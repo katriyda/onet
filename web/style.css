@@ -1,0 +1,368 @@
+/* onet — 移动端优先，深色主题；body.mode-mobile / body.mode-desktop 由 JS 驱动 */
+
+:root {
+  --bg: #101014;
+  --surface: #17171d;
+  --surface-2: #1e1e26;
+  --fg: #e6e6e6;
+  --muted: #8a8a96;
+  --border: #2a2a33;
+  --accent: #4c8dff;
+  --ok: #3ecf6a;
+  --danger: #ff5f56;
+  --key-h: 44px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+[hidden] { display: none !important; }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ---------------- 布局骨架 ---------------- */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+#header {
+  flex: none;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding-top: env(safe-area-inset-top);
+}
+
+/* 移动端状态条 */
+#m-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 8px;
+}
+#m-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+#m-sess-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 桌面 tab 栏（默认隐藏，见下方断点） */
+#d-bar {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 8px;
+}
+#d-tabs {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#d-tabs::-webkit-scrollbar { display: none; }
+#d-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 180px;
+}
+#d-sess-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  color: var(--muted);
+  flex: none;
+}
+.tab.active {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--fg);
+}
+.tab.dead .tab-name { color: var(--muted); text-decoration: line-through; }
+.tab-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.tab-btn:hover { background: var(--border); color: var(--fg); }
+
+/* 状态圆点 */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-block;
+}
+.dot.on { background: var(--ok); }
+.dot.off { background: var(--muted); }
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 16px;
+  color: var(--fg);
+  flex: none;
+}
+.icon-btn:active { background: var(--border); }
+
+/* 退出横幅 */
+#exit-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+  background: #2a1414;
+}
+#exit-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.btn:active { background: var(--border); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--danger); }
+
+/* ---------------- 终端区 ---------------- */
+#term-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+#term {
+  position: absolute;
+  inset: 0;
+  padding: 4px;
+}
+#term .xterm {
+  height: 100%;
+}
+#term .xterm-viewport { background: transparent; }
+
+#placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--muted);
+  z-index: 5;
+}
+
+/* ---------------- 额外按键栏（触屏） ---------------- */
+#keys {
+  display: none;
+  flex: none;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 6px;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+body.mode-mobile #keys.show { display: grid; }
+body.mode-desktop #keys.show { display: grid; }
+
+.key {
+  height: var(--key-h);
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 15px;
+  touch-action: manipulation;
+}
+.key:active { background: var(--border); }
+.key.mod { color: var(--accent); }
+.key.mod-on { box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+.key.mod-lock { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ---------------- 抽屉（移动端） ---------------- */
+#drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(78vw, 300px);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  z-index: 100;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  display: flex;
+  flex-direction: column;
+}
+#drawer.open { transform: none; }
+#drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 12px;
+  font-weight: 600;
+}
+#drawer-list {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+}
+.d-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.d-item.active { background: var(--surface-2); }
+.d-label { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d-meta { font-size: 12px; color: var(--muted); flex: none; }
+
+#scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 90;
+}
+
+/* ---------------- 上下文菜单 ---------------- */
+#ctx {
+  position: fixed;
+  z-index: 120;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  min-width: 140px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+#ctx button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+#ctx button:active { background: var(--border); }
+#ctx button.danger { color: var(--danger); }
+
+/* ---------------- 登录页 ---------------- */
+#login {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#login-form {
+  width: min(320px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#login-form h1 { font-size: 24px; }
+.login-hint { color: var(--muted); font-size: 14px; }
+#login-token {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 15px;
+  width: 100%;
+}
+#login-token:focus { outline: none; border-color: var(--accent); }
+#login-err { color: var(--danger); font-size: 13px; }
+
+/* ---------------- 轻提示 ---------------- */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: rgba(30, 30, 38, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  z-index: 150;
+  max-width: 86vw;
+  text-align: center;
+}
+body.mode-desktop #toast { bottom: 24px; }
+
+/* ---------------- 桌面断点（JS 加载前的兜底，避免闪烁） ---------------- */
+@media (min-width: 768px) and (pointer: fine) {
+  #m-status { display: none; }
+  #d-bar { display: flex; }
+}
+
+/* JS 类驱动（覆盖媒体查询与 config 强制模式） */
+body.mode-desktop #m-status { display: none; }
+body.mode-desktop #d-bar { display: flex; }
+body.mode-mobile #m-status { display: flex; }
+body.mode-mobile #d-bar { display: none; }

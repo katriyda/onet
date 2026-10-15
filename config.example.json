@@ -1,0 +1,11 @@
+{
+  "host": "127.0.0.1",
+  "port": 7681,
+  "token": "",
+  "shell": "",
+  "cwd": "",
+  "scrollback": 5000,
+  "font_size": 15,
+  "ui": "auto",
+  "extra_keys": ["ESC", "/", "-", "TAB", "CTRL", "ALT", "←", "↑", "↓", "→"]
+}

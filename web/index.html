@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101014">
+<title>onet</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css?v=1">
+<link rel="stylesheet" href="/static/style.css?v=1">
+</head>
+<body>
+<div id="app">
+  <header id="header">
+    <!-- 移动端状态条 -->
+    <div id="m-status">
+      <button id="m-menu-btn" class="icon-btn" aria-label="会话菜单">☰</button>
+      <div id="m-title">
+        <span id="m-sess-name">—</span>
+        <span id="m-dot" class="dot off"></span>
+      </div>
+      <button id="m-new-btn" class="icon-btn" aria-label="新建会话">＋</button>
+    </div>
+    <!-- 桌面端 tab 栏 -->
+    <div id="d-bar">
+      <div id="d-tabs"></div>
+      <div id="d-title">
+        <span id="d-sess-name">—</span>
+        <span id="d-dot" class="dot off"></span>
+      </div>
+      <button id="d-keys-btn" class="icon-btn" title="额外按键栏">⌨</button>
+      <button id="d-new-btn" class="icon-btn" title="新建会话">＋</button>
+    </div>
+    <!-- 会话退出横幅 -->
+    <div id="exit-banner" hidden>
+      <span id="exit-text"></span>
+      <button id="exit-restart" class="btn">重启</button>
+      <button id="exit-remove" class="btn danger">删除</button>
+    </div>
+  </header>
+
+  <main id="term-wrap">
+    <div id="term"></div>
+    <div id="placeholder" hidden>
+      <p>无会话</p>
+      <button id="ph-new" class="btn">新建会话</button>
+    </div>
+  </main>
+
+  <!-- 触屏额外按键栏 -->
+  <div id="keys"></div>
+</div>
+
+<!-- 移动端抽屉 -->
+<div id="scrim" hidden></div>
+<nav id="drawer" hidden>
+  <div id="drawer-head">
+    <span>会话</span>
+    <button id="drawer-new" class="btn">＋ 新建</button>
+  </div>
+  <ul id="drawer-list"></ul>
+</nav>
+
+<!-- 上下文菜单 -->
+<div id="ctx" hidden></div>
+
+<!-- token 登录页 -->
+<div id="login" hidden>
+  <form id="login-form">
+    <h1>onet</h1>
+    <p class="login-hint">需要访问令牌</p>
+    <input id="login-token" type="password" placeholder="token" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button type="submit" class="btn primary">登录</button>
+    <p id="login-err" hidden></p>
+  </form>
+</div>
+
+<!-- 轻提示 -->
+<div id="toast" hidden></div>
+
+<script src="/static/vendor/xterm.js?v=1"></script>
+<script src="/static/vendor/addon-fit.js?v=1"></script>
+<script src="/static/app.js?v=1"></script>
+</body>
+</html>
