@@ -117,8 +117,15 @@ window.addEventListener('resize', () => { applyMode(); layout(); });
 /* ---------------- 布局 / 尺寸 ---------------- */
 function layout() {
   const vv = window.visualViewport;
-  if (vv) app.style.height = vv.height + 'px';
-  else app.style.height = '';
+  if (vv) {
+    app.style.height = vv.height + 'px';
+    document.documentElement.style.setProperty('--vv-top', vv.offsetTop + 'px');
+    document.documentElement.style.setProperty('--vvh', vv.height + 'px');
+  } else {
+    app.style.height = '';
+    document.documentElement.style.removeProperty('--vv-top');
+    document.documentElement.style.removeProperty('--vvh');
+  }
   fitTerm();
 }
 
@@ -136,6 +143,62 @@ let resizeTimer = null;
 function scheduleResize() {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(sendResize, 80);
+}
+
+/* ---------------- 软键盘保持（点按界面不收起输入法） ---------------- */
+// 点按界面控件时焦点不能离开 xterm 的 textarea，否则移动端输入法会收起。
+// pointerdown 阻止默认对 Chromium 有效；iOS 需 mousedown（WebKit bug 322721：
+// 元素挂了 click 监听时 pointerdown 的 preventDefault 挡不住焦点转移）。
+const CHROME_SEL = '#header, #keys, #drawer, #ctx, #scrim, #ph-new';
+let focusStolen = false;
+
+function keepKeyboard(ev) {
+  if (!term || document.activeElement !== term.textarea) return; // 键盘没弹起，不干预
+  const t = ev.target;
+  if (!(t instanceof Element) || !t.closest(CHROME_SEL)) return;
+  ev.preventDefault();
+  if (focusStolen) return;
+  focusStolen = true;
+  document.addEventListener('pointerup', restoreKeyboard, { capture: true });
+  document.addEventListener('pointercancel', restoreKeyboard, { capture: true });
+}
+// 兜底：个别浏览器仍丢掉焦点时，抬手瞬间把焦点还给终端（iOS 允许在手势内重新聚焦）
+function restoreKeyboard() {
+  document.removeEventListener('pointerup', restoreKeyboard, { capture: true });
+  document.removeEventListener('pointercancel', restoreKeyboard, { capture: true });
+  focusStolen = false;
+  if (term && document.activeElement !== term.textarea) term.focus();
+}
+document.addEventListener('pointerdown', keepKeyboard, { capture: true });
+document.addEventListener('mousedown', keepKeyboard, { capture: true });
+
+// 界面动作统一走 pointer 事件（阻止默认后 click 在触屏上未必派发）。
+// 滑动超过 10px（滚动/拖拽）不算点按；鼠标划出元素取消；键盘 Enter/Space 的 click（detail === 0）保留。
+let lastTapAt = 0;
+function onTap(el, fn) {
+  let down = null;
+  el.addEventListener('pointerdown', (ev) => {
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    down = { x: ev.clientX, y: ev.clientY };
+    el.classList.add('pressed');
+  });
+  el.addEventListener('pointerup', (ev) => {
+    el.classList.remove('pressed');
+    const start = down;
+    down = null;
+    if (!start || Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10) return;
+    lastTapAt = performance.now();
+    fn(ev);
+  });
+  el.addEventListener('pointercancel', () => { down = null; el.classList.remove('pressed'); });
+  el.addEventListener('pointerleave', (ev) => {
+    if (ev.pointerType !== 'mouse') return;
+    down = null;
+    el.classList.remove('pressed');
+  });
+  el.addEventListener('click', (ev) => {
+    if (ev.detail === 0 && performance.now() - lastTapAt > 700) fn(ev);
+  });
 }
 
 /* ---------------- xterm ---------------- */
@@ -440,7 +503,7 @@ function renderTabs() {
     const name = document.createElement('span');
     name.className = 'tab-name';
     name.textContent = s.name || s.id;
-    name.addEventListener('click', () => switchTo(s));
+    onTap(name, () => switchTo(s));
 
     tab.appendChild(dot);
     tab.appendChild(name);
@@ -450,7 +513,7 @@ function renderTabs() {
       rst.className = 'tab-btn';
       rst.textContent = '↻';
       rst.title = '重启会话';
-      rst.addEventListener('click', (ev) => { ev.stopPropagation(); restartSession(s.id); });
+      onTap(rst, () => restartSession(s.id));
       tab.appendChild(rst);
     }
 
@@ -458,7 +521,7 @@ function renderTabs() {
     x.className = 'tab-btn';
     x.textContent = '×';
     x.title = '删除会话';
-    x.addEventListener('click', (ev) => { ev.stopPropagation(); removeSession(s.id); });
+    onTap(x, () => removeSession(s.id));
     tab.appendChild(x);
 
     box.appendChild(tab);
@@ -483,7 +546,7 @@ function renderDrawer() {
     meta.textContent = (s.dead ? '已退出 ' : '') + (s.attached > 0 ? s.attached + ' 在线' : '');
 
     li.append(dot, label, meta);
-    li.addEventListener('click', () => { closeDrawer(); switchTo(s); });
+    onTap(li, () => { closeDrawer(); switchTo(s); });
     li.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       showMenu(ev.clientX, ev.clientY, sessionMenu(s));
@@ -499,9 +562,9 @@ function closeDrawer() {
   scrim.classList.remove('open');
   setTimeout(() => { drawer.hidden = true; scrim.hidden = true; }, 200);
 }
-$('#m-menu-btn').addEventListener('click', openDrawer);
-$('#drawer-new').addEventListener('click', () => { closeDrawer(); createSession(); });
-scrim.addEventListener('click', closeDrawer);
+onTap($('#m-menu-btn'), openDrawer);
+onTap($('#drawer-new'), () => { closeDrawer(); createSession(); });
+onTap(scrim, closeDrawer);
 // 左缘滑入
 app.addEventListener('touchstart', (ev) => {
   if (mode !== 'mobile' || drawer.hidden || ev.touches.length !== 1) return;
@@ -515,7 +578,7 @@ function showMenu(x, y, items) {
     const b = document.createElement('button');
     b.textContent = it.label;
     b.className = it.danger ? 'danger' : '';
-    b.addEventListener('click', () => { hideMenu(); it.fn(); });
+    onTap(b, () => { hideMenu(); it.fn(); });
     ctx.appendChild(b);
   }
   ctx.hidden = false;
@@ -523,10 +586,13 @@ function showMenu(x, y, items) {
   const pad = 8;
   ctx.style.left = clamp(x, pad, innerWidth - rect.width - pad) + 'px';
   ctx.style.top = clamp(y, pad, innerHeight - rect.height - pad) + 'px';
-  setTimeout(() => document.addEventListener('click', hideOnce, true), 0);
+  document.addEventListener('pointerdown', hideOutsideMenu, true);
 }
-function hideOnce() { hideMenu(); document.removeEventListener('click', hideOnce, true); }
-function hideMenu() { ctx.hidden = true; }
+function hideOutsideMenu(ev) { if (!ctx.contains(ev.target)) hideMenu(); }
+function hideMenu() {
+  ctx.hidden = true;
+  document.removeEventListener('pointerdown', hideOutsideMenu, true);
+}
 
 function mobileMenu() {
   return [
@@ -615,29 +681,42 @@ function renderKeys() {
     b.textContent = k;
     b.dataset.key = k;
 
-    let lp = null;
-    let lastTouchEnd = 0;
+    const isMod = k === 'CTRL' || k === 'ALT';
     const modName = k.toLowerCase(); // modState 键为小写
-    b.addEventListener('touchstart', (ev) => {
-      if (k !== 'CTRL' && k !== 'ALT') return;
-      lp = setTimeout(() => { lp = null; toggleMod(modName, true); }, 500);
-    }, { passive: true });
-    // 触屏：touchend 即触发按键；CTRL/ALT 为点按修饰（长按锁定）
-    b.addEventListener('touchend', (ev) => {
-      lastTouchEnd = Date.now();
-      if (k === 'CTRL' || k === 'ALT') {
-        if (lp) { clearTimeout(lp); lp = null; toggleMod(modName, false); }
+    let down = null, holdTimer = null, held = false;
+    const reset = () => {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+      held = false;
+      down = null;
+      b.classList.remove('pressed');
+    };
+
+    b.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      down = { x: ev.clientX, y: ev.clientY };
+      b.classList.add('pressed');
+      if (!isMod) return;
+      holdTimer = setTimeout(() => { holdTimer = null; held = true; toggleMod(modName, true); }, 500); // 长按 = 锁定
+    });
+    b.addEventListener('pointerup', (ev) => {
+      const start = down;
+      const wasHeld = held;
+      b.classList.remove('pressed');
+      clearTimeout(holdTimer);
+      holdTimer = null;
+      held = false;
+      down = null;
+      if (!start) return;
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10) return; // 划出按键 = 取消
+      if (isMod) {
+        if (!wasHeld) toggleMod(modName, false); // 点按 = 武装一次 / 取消
         return;
       }
       pressKey(k);
-    }, { passive: true });
-    b.addEventListener('touchcancel', () => { clearTimeout(lp); lp = null; }, { passive: true });
-    // 鼠标/桌面点击；触屏 touchend 后 500ms 内的 ghost click 忽略
-    b.addEventListener('click', () => {
-      if (Date.now() - lastTouchEnd < 500) return;
-      if (k === 'CTRL' || k === 'ALT') { toggleMod(modName, false); return; }
-      pressKey(k);
     });
+    b.addEventListener('pointercancel', reset);
+    b.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') reset(); });
 
     keysBar.appendChild(b);
   }
@@ -684,12 +763,12 @@ function pressKey(k) {
   if (ws && ws.readyState === 1) ws.send(out);
 }
 
-$('#d-keys-btn').addEventListener('click', toggleKeys);
-$('#d-new-btn').addEventListener('click', createSession);
-$('#m-new-btn').addEventListener('click', createSession);
-$('#ph-new').addEventListener('click', createSession);
-$('#exit-restart').addEventListener('click', () => { if (current) restartSession(current.id); });
-$('#exit-remove').addEventListener('click', () => { if (current) removeCurrent(); });
+onTap($('#d-keys-btn'), toggleKeys);
+onTap($('#d-new-btn'), createSession);
+onTap($('#m-new-btn'), createSession);
+onTap($('#ph-new'), createSession);
+onTap($('#exit-restart'), () => { if (current) restartSession(current.id); });
+onTap($('#exit-remove'), () => { if (current) removeCurrent(); });
 
 /* ---------------- 轻提示 ---------------- */
 let toastTimer = null;

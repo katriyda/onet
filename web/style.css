@@ -239,8 +239,8 @@ body.mode-desktop #keys.show { display: grid; }
 /* ---------------- 抽屉（移动端） ---------------- */
 #drawer {
   position: fixed;
-  top: 0;
-  bottom: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vvh, 100%);
   left: 0;
   width: min(78vw, 300px);
   background: var(--surface);
@@ -352,6 +352,7 @@ body.mode-desktop #keys.show { display: grid; }
   z-index: 150;
   max-width: 86vw;
   text-align: center;
+  pointer-events: none;
 }
 body.mode-desktop #toast { bottom: 24px; }
 
@@ -366,3 +367,9 @@ body.mode-desktop #m-status { display: none; }
 body.mode-desktop #d-bar { display: flex; }
 body.mode-mobile #m-status { display: flex; }
 body.mode-mobile #d-bar { display: none; }
+
+/* ---------------- 点按反馈（阻止默认后触屏 :active 不可靠） ---------------- */
+.icon-btn.pressed,
+.btn.pressed,
+.key.pressed,
+#ctx button.pressed { background: var(--border); }
