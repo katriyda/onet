@@ -2,83 +2,118 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#101014">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#0f0f13">
+<meta name="color-scheme" content="dark">
 <title>onet</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css?v=1">
-<link rel="stylesheet" href="/static/style.css?v=2">
+<link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M17 10h.01M7 14h10"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><path d="M9 4h6M9 4a2 2 0 0 0-2 2v1h10V6a2 2 0 0 0-2-2M7 7H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></symbol>
+  <symbol id="i-font" viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></symbol>
+</defs></svg>
+
 <div id="app">
   <header id="header">
-    <!-- 移动端状态条 -->
     <div id="m-status">
-      <button id="m-menu-btn" class="icon-btn" aria-label="会话菜单">☰</button>
-      <div id="m-title">
+      <button id="m-menu-btn" class="icon-btn" aria-label="会话列表" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+      <button id="m-title" class="bar-title" aria-label="会话列表" aria-haspopup="dialog">
         <span id="m-sess-name">—</span>
         <span id="m-dot" class="dot off"></span>
-      </div>
-      <button id="m-new-btn" class="icon-btn" aria-label="新建会话">＋</button>
+      </button>
+      <button id="m-more-btn" class="icon-btn" aria-label="终端操作" aria-haspopup="menu"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button>
+      <button id="m-new-btn" class="icon-btn" aria-label="新建会话"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
     </div>
-    <!-- 桌面端 tab 栏 -->
+
     <div id="d-bar">
       <div id="d-tabs"></div>
-      <div id="d-title">
-        <span id="d-sess-name">—</span>
-        <span id="d-dot" class="dot off"></span>
-      </div>
-      <button id="d-keys-btn" class="icon-btn" title="额外按键栏">⌨</button>
-      <button id="d-new-btn" class="icon-btn" title="新建会话">＋</button>
+      <div id="d-title"><span id="d-sess-name">—</span><span id="d-dot" class="dot off"></span></div>
+      <button id="d-more-btn" class="icon-btn" title="终端操作" aria-label="终端操作" aria-haspopup="menu"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button>
+      <button id="d-new-btn" class="icon-btn" title="新建会话" aria-label="新建会话"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
+      <button id="d-keys-btn" class="icon-btn" title="额外按键栏" aria-label="额外按键栏"><svg class="icon" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
     </div>
-    <!-- 会话退出横幅 -->
+
     <div id="exit-banner" hidden>
       <span id="exit-text"></span>
-      <button id="exit-restart" class="btn">重启</button>
-      <button id="exit-remove" class="btn danger">删除</button>
+      <div class="banner-actions">
+        <button id="exit-restart" class="btn small">重启</button>
+        <button id="exit-remove" class="btn small danger">删除</button>
+      </div>
     </div>
   </header>
 
   <main id="term-wrap">
     <div id="term"></div>
+    <div id="touch-layer" aria-hidden="true"></div>
+
+    <div id="select-bar" hidden>
+      <span id="select-info">已选 1 行</span>
+      <button id="select-copy" class="btn small primary">复制</button>
+      <button id="select-all" class="btn small">全选</button>
+      <button id="select-cancel" class="icon-btn small" aria-label="取消选择"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+
+    <button id="scroll-pill" hidden>
+      <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"/></svg>
+      <span id="scroll-pill-text">回到底部</span>
+    </button>
+
     <div id="placeholder" hidden>
-      <p>无会话</p>
-      <button id="ph-new" class="btn">新建会话</button>
+      <svg class="empty-icon" aria-hidden="true"><use href="#i-terminal"/></svg>
+      <p>没有会话</p>
+      <button id="ph-new" class="btn primary">新建会话</button>
     </div>
   </main>
 
-  <!-- 触屏额外按键栏 -->
-  <div id="keys"></div>
+  <div id="keys" role="toolbar" aria-label="额外按键"></div>
 </div>
 
-<!-- 移动端抽屉 -->
 <div id="scrim" hidden></div>
-<nav id="drawer" hidden>
+<nav id="drawer" hidden aria-label="会话列表">
   <div id="drawer-head">
-    <span>会话</span>
-    <button id="drawer-new" class="btn">＋ 新建</button>
+    <div>
+      <div class="sheet-title">会话</div>
+      <div class="sheet-sub" id="drawer-sub">0 个会话</div>
+    </div>
+    <button id="drawer-close" class="icon-btn" aria-label="关闭会话列表"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <ul id="drawer-list"></ul>
+  <div id="drawer-foot"><button id="drawer-new" class="btn primary full"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>新建会话</button></div>
 </nav>
 
-<!-- 上下文菜单 -->
-<div id="ctx" hidden></div>
+<div id="menu-layer" hidden>
+  <div id="menu-scrim"></div>
+  <div id="menu" role="menu" aria-label="操作菜单"></div>
+</div>
 
-<!-- token 登录页 -->
 <div id="login" hidden>
   <form id="login-form">
     <h1>onet</h1>
     <p class="login-hint">需要访问令牌</p>
     <input id="login-token" type="password" placeholder="token" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <button type="submit" class="btn primary">登录</button>
+    <button type="submit" class="btn primary full">登录</button>
     <p id="login-err" hidden></p>
   </form>
 </div>
 
-<!-- 轻提示 -->
-<div id="toast" hidden></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="/static/vendor/xterm.js?v=1"></script>
 <script src="/static/vendor/addon-fit.js?v=1"></script>
-<script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=12"></script>
 </body>
 </html>

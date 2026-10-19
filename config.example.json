@@ -7,5 +7,5 @@
   "scrollback": 5000,
   "font_size": 15,
   "ui": "auto",
-  "extra_keys": ["ESC", "/", "-", "TAB", "CTRL", "ALT", "←", "↑", "↓", "→"]
+  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"]
 }

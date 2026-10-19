@@ -17,7 +17,7 @@ type Config struct {
 	Scrollback int      `json:"scrollback"`  // xterm 回滚行数，默认 5000
 	FontSize   int      `json:"font_size"`   // 终端字号，默认 15
 	UI         string   `json:"ui"`          // "auto"|"mobile"|"desktop"，默认 "auto"
-	ExtraKeys  []string `json:"extra_keys"`  // 触屏额外按键栏，默认 termux 经典 10 键
+	ExtraKeys  []string `json:"extra_keys"`  // 触屏额外按键栏，默认 agent 常用 12 键
 }
 
 // DefaultConfig 返回全部字段取默认值的 Config。
@@ -32,8 +32,8 @@ func DefaultConfig() Config {
 		FontSize:   15,
 		UI:         "auto",
 		ExtraKeys: []string{
-			"ESC", "/", "-", "TAB", "CTRL", "ALT",
-			"←", "↑", "↓", "→",
+			"ESC", "TAB", "CTRL", "ALT", "^C", "ENTER",
+			"←", "↑", "↓", "→", "PGUP", "PGDN",
 		},
 	}
 }

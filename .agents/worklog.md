@@ -1,0 +1,18 @@
+## 2026-10-19 13:00 — 移动端与 agent 交互体验重构
+- session: s-20261019-onetux
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 重新审视移动端交互，重点优化 agent（omp）操作与上下文查看体验，并统一移动/桌面菜单
+- 做了什么:
+  - 定位 xterm DOM renderer 滚动时替换行节点导致 touchmove 丢失的问题，新增稳定 `#touch-layer`，实现像素级拖拽 + 惯性滚动
+  - 普通缓冲区改 `scrollTop`；alternate screen / 鼠标上报时把拖拽翻译成 `WheelEvent`，omp/less/vim 可滚动（用 less --mouse 验证 SGR wheel）
+  - 长按终端改为整行选中，可拖动扩展/边缘自动滚动，顶部提供复制/全选/取消；复制走剪贴板
+  - 新增「回到底部」浮标与流式「新输出」提示；修复 attach 重放早于 attached 导致首屏/切会话/刷新丢输出
+  - 统一菜单组件：移动端底部操作表、桌面锚定浮层/居中确认，同一套图标、文案、危险色
+  - 会话抽屉补齐行尾操作、长按菜单、左缘滑入/左滑关闭；修复原先左缘手势条件写反
+  - 按键栏默认改为 agent 常用 12 键（^C/Enter/PgUp/PgDn），支持特殊键别名、方向键长按连发、Ctrl/Alt+方向键编码
+  - 按键栏/退出横幅切换时重新 fit PTY；字号持久化；桌面按键栏紧凑居中；操作后焦点回终端
+  - 更新 README 与 AGENTS.md 踩坑记录
+- 产出: web/app.js、web/style.css、web/index.html、config.go、config.example.json、README.md、AGENTS.md
+- 结果: 完成。已用移动端触屏仿真验证滚动惯性、选中复制、TUI 滚轮、菜单位置、抽屉手势、重放/切换、PTY 重排；真机 IME 与软键盘遮挡仍需复验
+- meta: files=web/app.js,web/style.css,web/index.html,config.go,config.example.json,README.md,AGENTS.md,.agents/worklog.md
