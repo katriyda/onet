@@ -40,7 +40,12 @@ go build -o onet .
   "scrollback": 5000,
   "font_size": 15,
   "ui": "auto",
-  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"]
+  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"],
+  "log_file": "onet.log",
+  "log_level": "info",
+  "log_max_size_mb": 20,
+  "log_max_backups": 5,
+  "log_terminal_io": false
 }
 ```
 
@@ -55,11 +60,32 @@ go build -o onet .
 | `font_size` | `15` | 初始字号（可在界面中调整） |
 | `ui` | `"auto"` | 界面模式：`auto`（按输入设备自适应）、`mobile`（强制触屏布局）、`desktop`（强制桌面布局） |
 | `extra_keys` | agent 常用 12 键 | 触屏额外按键栏；`ESC`/`TAB`/`ENTER`/`^C`/`PGUP`/`PGDN`/`HOME`/`END`/`BS`/`DEL`/`←↑↓→` 有特殊含义，`CTRL`/`ALT` 为 sticky 修饰键，其余字符串按字面量发送 |
+| `log_file` | `<二进制目录>/onet.log` | 日志文件路径（JSONL）；空串 = 仅输出到 stderr。相对路径按配置文件所在目录解析 |
+| `log_level` | `"info"` | `debug`/`info`/`warn`/`error`；`debug` 额外记录静态资源请求、resize、广播等高频事件，并附带源码位置 |
+| `log_max_size_mb` | `20` | 单个日志文件上限（MB），超出后轮转到 `onet.log.1`；`0` = 不轮转 |
+| `log_max_backups` | `5` | 保留的历史份数；`0` = 轮转时直接截断当前文件 |
+| `log_terminal_io` | `false` | 开启后记录 PTY 原始输入/输出（base64），**可能包含密码、token 等敏感数据** |
+
+## 日志
+
+服务端把关键事件写成 JSONL（一行一个事件），默认 `<二进制目录>/onet.log`，单文件 20MB、保留 5 份历史（`onet.log.1` … `onet.log.5`）：
+
+```json
+{"time":"2026-10-19T14:00:00.123+08:00","level":"INFO","msg":"ws.command","conn":"c1","cmd":"attach","session":"sess-1"}
+```
+
+覆盖的事件：进程启动/关闭、HTTP 请求（含状态码、耗时，`/static/` 与 `/ws` 记 debug 级）、认证失败与登录、WebSocket 连接/命令/错误、会话创建/attach/detach/退出/重启/删除、PTY 启动与错误。查询串里的 `token` 参数写入日志前替换为 `***`。
+
+浏览器端把自己产生的事件与未捕获异常（`error`/`unhandledrejection`/`console.warn|error`）通过已认证的 WebSocket 批量回传到同一文件（`client.log`），离线或登录前的日志暂存 `sessionStorage`，恢复后继续回传。
+
+- 网页内查看：终端操作菜单 `⋯` → **日志**，可切换「客户端 / 服务端」、复制、下载合并后的 `.jsonl`
+- 直接访问：`GET /logs?tail=2000`（末尾 N 行，1–5000）、`GET /logs?download=1`（合并全部分片下载）；两者与 `/config`、`/ws` 一样需要 token
+- 终端原始输入/输出默认**不记录**；需要排查交互问题时再开 `log_terminal_io`，启动时会写一条 `app.insecure_log` 警告
 
 ## 安全
 
 - 默认只监听 `127.0.0.1`，仅本机可访问，无认证。
-- **对外开放前必须设置 `token`**：未携带有效 token 时，`/config`、`/ws` 等接口返回 401，页面显示令牌输入页。token 可通过 cookie（登录页）、`?token=` 参数或 `Authorization: Bearer` 头传递。
+- **对外开放前必须设置 `token`**：未携带有效 token 时，`/config`、`/logs`、`/ws` 等接口返回 401，页面显示令牌输入页。token 可通过 cookie（登录页）、`?token=` 参数或 `Authorization: Bearer` 头传递。
 - 传输为明文 HTTP；需要加密时请置于反向代理（nginx/Caddy）或 Tailscale Serve 之后。
 - 会话内是完整 shell，请像对待任何终端一样对待它的访问权限。
 

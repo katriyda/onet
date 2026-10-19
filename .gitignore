@@ -7,6 +7,10 @@ onet.exe
 # 本地配置（勿提交，含 token）
 config.json
 
+# 日志（含会话事件，可能含终端 I/O）
+onet.log
+onet.log.*
+
 # 临时文件
 tmp/
 *.tgz

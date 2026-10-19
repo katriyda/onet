@@ -13,7 +13,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -62,14 +61,14 @@ type conptyConn struct {
 	cmdInFile  *os.File
 	cmdOutFile *os.File
 
-	pending  []byte   // Read 尚未消费完的剩余字节
+	pending  []byte // Read 尚未消费完的剩余字节
 	outCh    chan []byte
 	outOnce  sync.Once
 	done     chan struct{}
 	pumpDone chan struct{}
 	exitCode int
 
-	closeOnce       sync.Once
+	closeOnce        sync.Once
 	closeConsoleOnce sync.Once
 }
 
@@ -125,7 +124,7 @@ func startConpty(app, cwd string, cols, rows int) (Pty, error) {
 		}
 		lastErr = fmt.Errorf("子进程在 ConPTY 初始化期间退出（0xC0000142 类故障）")
 		if attempt == 0 {
-			log.Printf("ConPTY 启动失败，重试 1 次: %v", lastErr)
+			appLog.Warn("pty.retry", "attempt", attempt+1, "err", lastErr)
 		}
 		_ = c.Close()
 		time.Sleep(100 * time.Millisecond)
@@ -421,5 +420,11 @@ func spawnShell(cfg Config, name string, cols, rows int) (Pty, error) {
 	if cwd == "" {
 		cwd, _ = os.UserHomeDir()
 	}
-	return startConpty(shell, cwd, cols, rows)
+	p, err := startConpty(shell, cwd, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	appLog.Info("pty.spawn", "session", name, "pid", p.Pid(), "shell", shell,
+		"cwd", cwd, "cols", cols, "rows", rows)
+	return p, nil
 }

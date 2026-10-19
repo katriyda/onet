@@ -7,5 +7,10 @@
   "scrollback": 5000,
   "font_size": 15,
   "ui": "auto",
-  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"]
+  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"],
+  "log_file": "onet.log",
+  "log_level": "info",
+  "log_max_size_mb": 20,
+  "log_max_backups": 5,
+  "log_terminal_io": false
 }

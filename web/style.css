@@ -620,6 +620,89 @@ body.mode-desktop .menu-head { padding: 4px 8px 8px; }
 body.mode-desktop .menu-title { font-size: 14px; }
 body.mode-desktop .step-btn { width: 28px; height: 28px; }
 
+/* ---------------- 日志面板 ---------------- */
+#log-layer {
+  position: fixed;
+  top: var(--vv-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--vvh, 100%);
+  z-index: 140; /* 高于菜单 130、低于 toast 150 与登录 200 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 12px;
+}
+#log-panel {
+  width: min(900px, 100%);
+  height: min(80vh, calc(var(--vvh, 100vh) - 24px));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+#log-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+#log-tabs {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px 0;
+}
+#log-tabs button {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface-3);
+}
+#log-tabs button.active { background: var(--accent-soft); color: var(--accent); }
+#log-tabs button.pressed { background: var(--border-strong); }
+#log-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 10px 14px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+  overscroll-behavior: contain;
+}
+#log-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 14px calc(12px + var(--safe-bottom));
+}
+body.mode-mobile #log-layer { padding: 0; }
+body.mode-mobile #log-panel {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
 /* ---------------- 登录页 ---------------- */
 #login {
   position: fixed;

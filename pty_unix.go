@@ -27,8 +27,6 @@ type unixPty struct {
 }
 
 func spawnShell(cfg Config, name string, cols, rows int) (Pty, error) {
-	_ = name // 保留接口兼容
-
 	shell := cfg.Shell
 	if shell == "" {
 		shell = os.Getenv("SHELL")
@@ -81,6 +79,8 @@ func spawnShell(cfg Config, name string, cols, rows int) (Pty, error) {
 		done: make(chan struct{}),
 	}
 	go c.waitLoop()
+	appLog.Info("pty.spawn", "session", name, "pid", cmd.Process.Pid, "shell", shell,
+		"cwd", cwd, "cols", cols, "rows", rows)
 	return c, nil
 }
 

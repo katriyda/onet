@@ -16,3 +16,19 @@
 - 产出: web/app.js、web/style.css、web/index.html、config.go、config.example.json、README.md、AGENTS.md
 - 结果: 完成。已用移动端触屏仿真验证滚动惯性、选中复制、TUI 滚轮、菜单位置、抽屉手势、重放/切换、PTY 重排；真机 IME 与软键盘遮挡仍需复验
 - meta: files=web/app.js,web/style.css,web/index.html,config.go,config.example.json,README.md,AGENTS.md,.agents/worklog.md
+
+## 2026-10-19 23:02 — 全链路日志（服务端 JSONL + 浏览器回传 + 网页查看/下载）
+- session: s-20261019-logs
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 服务端关键事件落 JSONL（大小轮转）、浏览器事件/异常经已认证 WS 回传、网页新增日志面板可查看并下载合并日志
+- 做了什么:
+  - 新增 `logging.go`：`setupLogging`（文件+stderr 双写、打开失败回退、显式路径失败仅 stderr）、`rotatingWriter`（path→path.1..N 轮转/截断）、`tailFile`、`redactedQuery`、`logParts`/`streamLogFiles`、`handleClientLogs`
+  - config 新增 `log_file`/`log_level`/`log_max_size_mb`/`log_max_backups`/`log_terminal_io`，校验非法值；相对 `log_file` 按配置文件目录解析；默认 `<二进制目录>/onet.log`
+  - server：`withAccessLog`（statusRecorder + Unwrap 保住 WS Hijacker）、`/logs?tail=N|download=1`、WS `hello` 帧、命令/错误/认证/登录事件、`cmdErr` 统一错误日志；PTY 输入输出仅在 `log_terminal_io` 打开时记录
+  - session/pty：创建/attach/detach/exit/restart/kill/remove/panic（run 循环加 recover + finishRun）、ConPTY 重试与 3s 兜底日志
+  - 前端：客户端 logger（console.warn/error 包装、error/unhandledrejection/network/visibility）、批量回传（30 条/60KB）、sessionStorage 续传、各操作插桩；新增日志面板（客户端/服务端 tab、刷新、复制、下载合并 .jsonl），菜单「日志」入口，资源版本 `style.css?v=7`、`app.js?v=13`
+  - 单测 `logging_test.go`（轮转/剪枝、tail 末行、截断首行、token 脱敏、级别解析）
+- 产出: logging.go、logging_test.go、config.go、main.go、server.go、session.go、pty_unix.go、pty_windows.go、web/app.js、web/index.html、web/style.css、config.example.json、README.md、.gitignore
+- 结果: 完成。go vet/test/build 通过；冒烟证明认证 401/200、WS hello→create→attach→echo→log→detach→remove、日志文件 11 类事件齐全、token 不落盘、1MB×3 轮转、info 级别过滤 debug；Chromium 验证面板开关/Esc/遮罩、客户端与服务端内容、下载文本同时含客户端与 `"msg":"ws.open"`、390×844 移动端全屏面板；真机 IME 与复制权限需复验
+- meta: files=logging.go,logging_test.go,config.go,main.go,server.go,session.go,web/app.js,web/index.html,web/style.css,README.md,config.example.json,.gitignore

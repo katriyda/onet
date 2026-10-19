@@ -57,9 +57,198 @@ const scrollPill = $('#scroll-pill'), scrollPillText = $('#scroll-pill-text');
 const selectBar = $('#select-bar'), selectInfo = $('#select-info');
 const login = $('#login'), loginForm = $('#login-form'), loginErr = $('#login-err');
 const toast = $('#toast');
+const logLayer = $('#log-layer'), logBody = $('#log-body'), logSub = $('#log-sub');
+const logTabClient = $('#log-tab-client'), logTabServer = $('#log-tab-server');
+
+/* ---------------- 日志：客户端采集 → WS 回传 → 服务端 JSONL ---------------- */
+// 浏览器侧事件/异常先入内存队列，WS 可用时按批回传；未发出的部分写入
+// sessionStorage，登录后刷新也能续传。查看器保留最近 1000 条。
+const CLIENT_LOG_MAX = 1000;
+const LOG_QUEUE_MAX = 500;
+const LOG_PERSIST_KEY = 'onet_log_queue';
+const LOG_BATCH_MAX = 30;
+const LOG_BATCH_BYTES = 60000;
+
+const clientId = (() => {
+  try {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+  } catch { /* noop */ }
+  return 'c-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+})();
+
+const clientLogs = [];
+const logQueue = [];
+const nativeConsole = {
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  debug: console.debug.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+
+let logFlushTimer = null;
+let logPersistTimer = null;
+let serverConnId = ''; // 当前 WS 连接标识（服务端 hello 帧回传）
+
+function truncateLog(s, max) {
+  const text = s == null ? '' : String(s);
+  return text.length > max ? text.slice(0, max) + '…' : text;
+}
+
+function logEvent(level, event, msg = '', stack = '') {
+  const entry = { source: 'client', ts: Date.now(), level, event };
+  if (msg) entry.msg = truncateLog(msg, 2000);
+  if (stack) entry.stack = truncateLog(stack, 2000);
+  clientLogs.push(entry);
+  if (clientLogs.length > CLIENT_LOG_MAX) clientLogs.splice(0, clientLogs.length - CLIENT_LOG_MAX);
+  logQueue.push(entry);
+  if (logQueue.length > LOG_QUEUE_MAX) logQueue.splice(0, logQueue.length - LOG_QUEUE_MAX);
+  const out = nativeConsole[level] || nativeConsole.log;
+  out('[onet] ' + event, msg || '');
+  scheduleLogFlush();
+  scheduleLogPersist();
+}
+
+function scheduleLogFlush() {
+  clearTimeout(logFlushTimer);
+  logFlushTimer = setTimeout(flushClientLogs, 200);
+}
+
+function scheduleLogPersist() {
+  clearTimeout(logPersistTimer);
+  logPersistTimer = setTimeout(persistLogQueue, 1000);
+}
+
+function persistLogQueue() {
+  try {
+    if (!logQueue.length) { sessionStorage.removeItem(LOG_PERSIST_KEY); return; }
+    sessionStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(logQueue.slice(-200)));
+  } catch { /* sessionStorage 不可用（隐私模式）：放弃持久化 */ }
+}
+
+function restoreLogQueue() {
+  let raw = null;
+  try { raw = sessionStorage.getItem(LOG_PERSIST_KEY); } catch { return; }
+  if (!raw) return;
+  let items;
+  try { items = JSON.parse(raw); } catch { return; }
+  if (!Array.isArray(items)) return;
+  for (const entry of items) {
+    if (!entry || typeof entry !== 'object' || typeof entry.event !== 'string') continue;
+    if (typeof entry.ts !== 'number' || typeof entry.level !== 'string') continue;
+    clientLogs.push(entry);
+    logQueue.push(entry);
+  }
+  if (clientLogs.length > CLIENT_LOG_MAX) clientLogs.splice(0, clientLogs.length - CLIENT_LOG_MAX);
+  if (logQueue.length > LOG_QUEUE_MAX) logQueue.splice(0, logQueue.length - LOG_QUEUE_MAX);
+}
+
+// 每批最多 30 条 / 60KB；发不完的 100ms 后继续，WS 不可用时保持排队。
+function flushClientLogs() {
+  clearTimeout(logFlushTimer);
+  logFlushTimer = null;
+  if (!ws || ws.readyState !== 1) return;
+  if (!logQueue.length) { persistLogQueue(); return; }
+
+  const batch = [];
+  let size = 0;
+  while (logQueue.length && batch.length < LOG_BATCH_MAX) {
+    const entry = logQueue[0];
+    const len = JSON.stringify(entry).length;
+    if (batch.length && size + len > LOG_BATCH_BYTES) break;
+    batch.push(entry);
+    size += len;
+    logQueue.shift();
+  }
+  if (!batch.length) return;
+
+  try {
+    ws.send(new TextEncoder().encode(JSON.stringify({ type: 'log', client: clientId, entries: batch })));
+  } catch {
+    for (let i = batch.length - 1; i >= 0; i--) logQueue.unshift(batch[i]);
+    return; // 本轮放弃，等下一条日志再触发
+  }
+
+  persistLogQueue();
+  if (logQueue.length) {
+    logFlushTimer = setTimeout(flushClientLogs, 100);
+  }
+}
+
+// 查询串里的 token 类参数一律替换为 ***，日志永不落 token。
+function safeLocation() {
+  const params = new URLSearchParams(location.search);
+  for (const key of Array.from(params.keys())) {
+    if (key.toLowerCase().includes('token')) params.set(key, '***');
+  }
+  const qs = params.toString();
+  return location.pathname + (qs ? '?' + qs : '');
+}
+
+function serializeLogArg(a) {
+  if (a instanceof Error) return a.stack || (a.name + ': ' + a.message);
+  if (typeof a === 'string') return a;
+  if (a === null || typeof a !== 'object') return String(a);
+  try { return JSON.stringify(a); } catch { return String(a); }
+}
+
+function joinLogArgs(args) {
+  return Array.prototype.map.call(args, serializeLogArg).join(' ');
+}
+
+function logClipboardError(operation, err) {
+  logEvent('warn', 'client.clipboard.error',
+    'operation=' + operation + ' message=' + ((err && err.message) || String(err)));
+}
+
+function installLogHooks() {
+  window.addEventListener('error', (ev) => {
+    // 资源加载失败（img/script）没有 Error 对象，target 是元素。
+    if (ev.target && ev.target !== window && ev.target.tagName) {
+      const t = ev.target;
+      logEvent('error', 'client.error',
+        'resource failed: ' + t.tagName.toLowerCase() + ' ' + (t.src || t.href || ''));
+      return;
+    }
+    logEvent('error', 'client.error',
+      (ev.message || 'unknown error') +
+        (ev.filename ? ' (' + ev.filename + ':' + ev.lineno + ':' + ev.colno + ')' : ''),
+      (ev.error && ev.error.stack) || '');
+  });
+
+  window.addEventListener('unhandledrejection', (ev) => {
+    const r = ev.reason;
+    logEvent('error', 'client.unhandled_rejection',
+      (r && (r.message || String(r))) || 'unknown rejection',
+      (r && r.stack) || '');
+  });
+
+  // 包一层 console.warn/error（先输出再记录），便于把第三方库的告警也带回来。
+  for (const level of ['warn', 'error']) {
+    const native = nativeConsole[level];
+    console[level] = (...args) => {
+      native(...args);
+      logEvent(level, 'client.console.' + level, joinLogArgs(args));
+    };
+  }
+
+  window.addEventListener('online', () => logEvent('info', 'client.network', 'online'));
+  window.addEventListener('offline', () => logEvent('warn', 'client.network', 'offline'));
+  document.addEventListener('visibilitychange', () => {
+    logEvent('debug', 'client.visibility', document.visibilityState);
+    if (document.visibilityState === 'hidden') {
+      flushClientLogs();
+      persistLogQueue();
+    }
+  });
+  window.addEventListener('pagehide', () => persistLogQueue());
+}
 
 /* ---------------- 启动 ---------------- */
 async function boot() {
+  logEvent('info', 'client.boot',
+    'href=' + safeLocation() + ' ua=' + navigator.userAgent + ' lang=' + navigator.language);
+
   const qs = new URLSearchParams(location.search);
 
   // 深链带 ?token= → 自动登录并去掉 URL 中的 token
@@ -70,23 +259,37 @@ async function boot() {
       body: JSON.stringify({ token: qs.get('token') }),
     });
     if (r.ok) {
+      logEvent('info', 'client.login.ok', 'via=deep_link');
       qs.delete('token');
+      persistLogQueue(); // 刷新会丢掉内存队列，先落盘
       location.replace(location.pathname + (qs.toString() ? '?' + qs : ''));
       return;
     }
+    logEvent('warn', 'client.login.error', 'via=deep_link status=' + r.status);
   }
 
   let resp;
   try {
     resp = await fetch('/config');
-  } catch {
+  } catch (err) {
+    logEvent('error', 'client.config.fetch_failed', (err && err.message) || String(err));
     showToast('无法连接服务器', 3000);
     return;
   }
-  if (resp.status === 401) { showLogin(); return; }
-  if (!resp.ok) { showToast('配置加载失败 (' + resp.status + ')', 3000); return; }
+  if (resp.status === 401) {
+    logEvent('info', 'client.config.unauthorized');
+    showLogin();
+    return;
+  }
+  if (!resp.ok) {
+    logEvent('error', 'client.config.http_error', 'status=' + resp.status);
+    showToast('配置加载失败 (' + resp.status + ')', 3000);
+    return;
+  }
 
   cfg = await resp.json();
+  logEvent('info', 'client.config.loaded',
+    'ui=' + cfg.ui + ' scrollback=' + cfg.scrollback + ' font_size=' + cfg.font_size);
   applyMode();
   initTerm();
   connectWS();
@@ -102,8 +305,15 @@ function showLogin() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: $('#login-token').value }),
     });
-    if (r.ok) { location.reload(); }
-    else { loginErr.textContent = '令牌错误'; loginErr.hidden = false; }
+    if (r.ok) {
+      logEvent('info', 'client.login.ok', 'via=form');
+      persistLogQueue(); // reload 前落盘，登录后继续回传
+      location.reload();
+    } else {
+      logEvent('warn', 'client.login.error', 'via=form status=' + r.status);
+      loginErr.textContent = '令牌错误';
+      loginErr.hidden = false;
+    }
   });
   setTimeout(() => $('#login-token').focus(), 50);
 }
@@ -367,6 +577,7 @@ function setFontSize(n, opts = {}) {
   if (!term) return;
   const fs = clamp(Math.round(n), 8, 32);
   if (fs === term.options.fontSize) return;
+  logEvent('debug', 'client.font', 'size=' + fs);
   term.options.fontSize = fs;
   localStorage.setItem('onet_font', String(fs));
   lastFitKey = '';
@@ -479,7 +690,7 @@ function copySelection() {
   const count = Math.abs(selection.focus - selection.anchor) + 1;
   writeClipboard(text)
     .then(() => { showToast('已复制 ' + count + ' 行'); clearSelection(); })
-    .catch(() => showToast('复制失败'));
+    .catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败'); });
 }
 
 function selectAllBuffer() {
@@ -726,6 +937,9 @@ function startMomentum(velocity) {
 
 /* ---------------- WS 协议 ---------------- */
 function sendCmd(obj) {
+  if (obj && obj.type !== 'resize') {
+    logEvent('debug', 'client.cmd', 'type=' + obj.type + (obj.id ? ' id=' + obj.id : ''));
+  }
   if (ws && ws.readyState === 1) {
     ws.send(new TextEncoder().encode(JSON.stringify(obj))); // 二进制帧 = JSON 命令
   }
@@ -734,6 +948,7 @@ function sendCmd(obj) {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const token = new URLSearchParams(location.search).get('token');
+  logEvent('debug', 'client.ws.connect', 'delay_ms=' + reconnectDelay + ' href=' + safeLocation());
   ws = new WebSocket(proto + '://' + location.host + '/ws' + (token ? '?token=' + encodeURIComponent(token) : ''));
   ws.binaryType = 'arraybuffer';
 
@@ -742,6 +957,7 @@ function connectWS() {
     everConnected = true;
     reconnectDelay = 1000;
     booting = true;
+    logEvent('info', 'client.ws.open', 'reconnected=' + reconnected + ' href=' + safeLocation());
     if (reconnected && term) {
       // 断线重连：服务端会重放 64KB 缓冲，先清屏避免内容重复
       current = null;
@@ -761,7 +977,10 @@ function connectWS() {
     if (typeof ev.data === 'string') return; // 服务器只发二进制
     handleMsg(ev.data);
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    logEvent('warn', 'client.ws.close',
+      'code=' + ev.code + ' reason=' + (ev.reason || '') + ' wasClean=' + ev.wasClean +
+        ' next_delay_ms=' + reconnectDelay);
     current = null;
     pendingAttach = null;
     clearSelection();
@@ -776,7 +995,10 @@ function connectWS() {
     reconnectTimer = setTimeout(connectWS, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 10000);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = () => {
+    logEvent('warn', 'client.ws.error', 'href=' + safeLocation());
+    ws.close();
+  };
 }
 
 function b64ToBytes(b64) {
@@ -790,6 +1012,10 @@ function handleMsg(buf) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(buf)); } catch { return; }
   switch (msg.type) {
+    case 'hello':
+      serverConnId = msg.conn || '';
+      logEvent('info', 'client.hello', 'conn=' + serverConnId);
+      break;
     case 'output': {
       const id = current ? current.id : (pendingAttach && pendingAttach.id);
       if (id && msg.id === id && term) {
@@ -799,13 +1025,16 @@ function handleMsg(buf) {
       break;
     }
     case 'exit':
+      logEvent('warn', 'client.session.exit', 'id=' + msg.id + ' code=' + msg.code);
       showToast('会话 ' + msg.id + ' 已退出 (code ' + msg.code + ')', 2000);
       break;
     case 'sessions':
+      logEvent('debug', 'client.sessions', 'count=' + (Array.isArray(msg.sessions) ? msg.sessions.length : 0));
       onSessions(msg.sessions);
       break;
     case 'attached':
       if (pendingAttach && pendingAttach.id !== msg.id) break; // 忽略过期的 attach 响应
+      logEvent('info', 'client.attach.ok', 'id=' + msg.id);
       pendingAttach = null;
       current = {
         id: msg.id,
@@ -826,9 +1055,11 @@ function handleMsg(buf) {
       }, 40);
       break;
     case 'created':
+      logEvent('info', 'client.session.created', 'id=' + msg.id);
       attachTo(msg.id);
       break;
     case 'detached':
+      logEvent('info', 'client.session.detached');
       current = null;
       pendingAttach = null;
       placeholder.hidden = false;
@@ -837,6 +1068,7 @@ function handleMsg(buf) {
       renderSessions();
       break;
     case 'error':
+      logEvent('warn', 'client.error_reply', msg.message);
       if (booting && /已退出|不存在/.test(msg.message)) {
         booting = false;
         pendingAttach = null;
@@ -913,11 +1145,13 @@ function pickTarget() {
 
 /* ---------------- 会话操作 ---------------- */
 function createSession() {
+  logEvent('info', 'client.session.create');
   sendCmd({ type: 'create', name: '' });
 }
 
 function attachTo(id) {
   if (!term) return;
+  logEvent('info', 'client.attach.request', 'id=' + id);
   cancelMomentum();
   cancelLongPress();
   gesture = null;
@@ -937,10 +1171,12 @@ function switchTo(s) {
   if (!s) return;
   if (s.dead) { showSessionMenu(s); return; }
   if (s.id === (current && current.id)) return;
+  logEvent('info', 'client.session.switch', 'from=' + (current ? current.id : '') + ' to=' + s.id);
   attachTo(s.id);
 }
 
 function restartSession(id) {
+  logEvent('info', 'client.session.restart', 'id=' + id);
   if (current && current.id === id && term) {
     term.reset();
     clearSelection();
@@ -953,6 +1189,7 @@ function restartSession(id) {
 
 function removeSession(id) {
   const s = findSession(id);
+  logEvent('info', 'client.session.remove', 'id=' + id + ' running=' + !!(s && !s.dead));
   if (s && !s.dead) {
     showMenu([
       { label: '取消', fn: () => {} },
@@ -1228,7 +1465,7 @@ function buildMenuItem(item) {
     onTap(b, () => {
       hideMenu();
       item.fn();
-      if (mode === 'desktop' && term) {
+      if (mode === 'desktop' && term && logLayer.hidden) {
         setTimeout(() => { if (!menuOpen) term.focus(); }, 0);
       }
     });
@@ -1362,6 +1599,8 @@ function terminalMenu() {
     checked: keysVisible,
     fn: toggleKeys,
   });
+  items.push({ type: 'separator' });
+  items.push({ label: '日志', icon: 'file', fn: openLogs });
   return items;
 }
 
@@ -1401,7 +1640,11 @@ function copyAll() {
   term.selectAll();
   const sel = term.getSelection();
   term.clearSelection();
-  if (sel) writeClipboard(sel).then(() => showToast('已复制全部')).catch(() => showToast('复制失败'));
+  if (sel) {
+    writeClipboard(sel)
+      .then(() => showToast('已复制全部'))
+      .catch((err) => { logClipboardError('copy-all', err); showToast('复制失败'); });
+  }
 }
 function copySelectionOrAll() {
   if (!term) return;
@@ -1412,7 +1655,7 @@ function copySelectionOrAll() {
       term.clearSelection();
       selection = { active: false, anchor: 0, focus: 0 };
       selectBar.hidden = true;
-    }).catch(() => showToast('复制失败'));
+    }).catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败'); });
   } else {
     copyAll();
   }
@@ -1422,7 +1665,8 @@ async function paste() {
   try {
     const text = await navigator.clipboard.readText();
     term.paste(text);
-  } catch {
+  } catch (err) {
+    logClipboardError('paste', err);
     showToast('无法读取剪贴板，请用系统粘贴');
   }
 }
@@ -1572,7 +1816,157 @@ function showToast(text, ms = 1800) {
   toastTimer = setTimeout(() => { toast.hidden = true; }, ms);
 }
 
+/* ---------------- 日志面板 ---------------- */
+let logSource = 'client';
+let serverLogText = '';
+let serverLogError = '';
+
+function clientLogText() {
+  if (!clientLogs.length) return '';
+  return clientLogs.map((e) => JSON.stringify(e)).join('\n') + '\n';
+}
+
+function serverLogLines() {
+  if (!serverLogText) return 0;
+  return serverLogText.replace(/\n$/, '').split('\n').length;
+}
+
+function updateLogSub() {
+  if (serverLogError) {
+    logSub.textContent = '客户端 ' + clientLogs.length + ' 条 · ' + serverLogError;
+    return;
+  }
+  logSub.textContent = '客户端 ' + clientLogs.length + ' 条 · 服务端 ' + serverLogLines() + ' 行';
+}
+
+function renderLogBody() {
+  if (logSource === 'client') {
+    logBody.textContent = clientLogText() || '暂无客户端日志';
+  } else {
+    logBody.textContent = serverLogText || serverLogError || '加载中…';
+  }
+  logBody.scrollTop = logBody.scrollHeight;
+  updateLogSub();
+}
+
+function openLogs() {
+  if (!term) return;
+  flushClientLogs();
+  persistLogQueue();
+  logLayer.hidden = false;
+  term.blur(); // 让出焦点，面板内可以正常选中文本
+  setLogSource('client');
+  refreshServerLogs();
+  logEvent('debug', 'client.logs.open');
+}
+
+function closeLogs() {
+  if (logLayer.hidden) return;
+  logLayer.hidden = true;
+  if (mode === 'desktop' && term) term.focus();
+}
+
+function setLogSource(src) {
+  logSource = src;
+  logTabClient.classList.toggle('active', src === 'client');
+  logTabServer.classList.toggle('active', src === 'server');
+  renderLogBody();
+  if (src === 'server' && !serverLogText && !serverLogError) refreshServerLogs();
+}
+
+async function refreshServerLogs() {
+  try {
+    const r = await fetch('/logs?tail=2000', { cache: 'no-store' });
+    if (r.status === 404) {
+      serverLogText = '';
+      serverLogError = '服务端文件日志未启用';
+    } else if (!r.ok) {
+      serverLogText = '';
+      serverLogError = '服务端日志读取失败 (' + r.status + ')';
+    } else {
+      serverLogText = await r.text();
+      serverLogError = '';
+    }
+  } catch (err) {
+    serverLogText = '';
+    serverLogError = '服务端日志读取失败';
+    logEvent('warn', 'client.logs.fetch_failed', (err && err.message) || String(err));
+  }
+  if (logSource === 'server') renderLogBody();
+  else updateLogSub();
+}
+
+async function refreshLogs() {
+  flushClientLogs();
+  persistLogQueue();
+  if (logSource === 'server') {
+    serverLogText = '';
+    serverLogError = '';
+    await refreshServerLogs();
+    return;
+  }
+  renderLogBody();
+}
+
+async function copyLogs() {
+  const text = logSource === 'client' ? clientLogText() : (serverLogText || serverLogError);
+  if (!text) { showToast('没有日志'); return; }
+  try {
+    await writeClipboard(text);
+    showToast('已复制');
+  } catch (err) {
+    logClipboardError('copy-logs', err);
+    showToast('复制失败');
+  }
+}
+
+function logStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+    '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+async function downloadLogs() {
+  const clientText = clientLogText();
+  let serverText = '';
+  try {
+    const r = await fetch('/logs?download=1', { cache: 'no-store' });
+    if (r.ok) serverText = await r.text();
+  } catch { /* 服务端部分拿不到时仍下载客户端日志 */ }
+  const text = clientText + serverText;
+  if (!text) { showToast('没有日志'); return; }
+
+  const blob = new Blob([text], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'onet-logs-' + logStamp() + '.jsonl';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  logEvent('info', 'client.logs.download',
+    'client_lines=' + (clientText ? clientText.replace(/\n$/, '').split('\n').length : 0) +
+      ' server_bytes=' + serverText.length);
+}
+
+onTap($('#log-close'), closeLogs);
+onTap($('#log-refresh'), refreshLogs);
+onTap($('#log-copy'), copyLogs);
+onTap($('#log-download'), downloadLogs);
+onTap(logTabClient, () => setLogSource('client'));
+onTap(logTabServer, () => setLogSource('server'));
+logLayer.addEventListener('pointerdown', (e) => { if (e.target === logLayer) closeLogs(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || logLayer.hidden) return;
+  e.preventDefault();
+  closeLogs();
+});
+
 /* ---------------- 启动 ---------------- */
+restoreLogQueue();
+installLogHooks();
 boot();
 
 })();

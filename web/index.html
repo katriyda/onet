@@ -7,7 +7,7 @@
 <meta name="color-scheme" content="dark">
 <title>onet</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css?v=1">
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false"><defs>
@@ -25,6 +25,7 @@
   <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
   <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></symbol>
   <symbol id="i-font" viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
 </defs></svg>
 
 <div id="app">
@@ -100,6 +101,28 @@
   <div id="menu" role="menu" aria-label="操作菜单"></div>
 </div>
 
+<div id="log-layer" hidden>
+  <section id="log-panel" role="dialog" aria-modal="true" aria-label="日志">
+    <div id="log-head">
+      <div>
+        <div class="sheet-title">日志</div>
+        <div class="sheet-sub" id="log-sub">客户端</div>
+      </div>
+      <button id="log-close" class="icon-btn" aria-label="关闭日志"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <div id="log-tabs">
+      <button id="log-tab-client" class="active">客户端</button>
+      <button id="log-tab-server">服务端</button>
+    </div>
+    <pre id="log-body"></pre>
+    <div id="log-foot">
+      <button id="log-refresh" class="btn small">刷新</button>
+      <button id="log-copy" class="btn small">复制</button>
+      <button id="log-download" class="btn small primary">下载</button>
+    </div>
+  </section>
+</div>
+
 <div id="login" hidden>
   <form id="login-form">
     <h1>onet</h1>
@@ -114,6 +137,6 @@
 
 <script src="/static/vendor/xterm.js?v=1"></script>
 <script src="/static/vendor/addon-fit.js?v=1"></script>
-<script src="/static/app.js?v=12"></script>
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>
