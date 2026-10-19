@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -18,6 +19,9 @@ import (
 	"time"
 )
 
+// version 由发布构建通过 -ldflags "-X main.version=<tag>" 注入；源码构建为 dev。
+var version = "dev"
+
 // defaultConfigPath 默认配置文件与二进制同目录。
 func defaultConfigPath() string {
 	exe, err := os.Executable()
@@ -28,6 +32,18 @@ func defaultConfigPath() string {
 }
 
 func main() {
+	// 顺手清掉上一次更新留下的 *.old；子命令不加载配置、不初始化日志。
+	cleanupStaleBinary()
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "update":
+			os.Exit(runUpdate(os.Args[2:]))
+		case "version", "-version", "--version":
+			fmt.Println(version)
+			return
+		}
+	}
+
 	configPath := flag.String("config", defaultConfigPath(), "配置文件路径（默认与二进制同目录的 config.json）")
 	flag.Parse()
 

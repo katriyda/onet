@@ -26,6 +26,19 @@ go build -o onet .
 
 也可以直接从 [Releases](../../releases) 下载对应平台的二进制，开箱即用（无需任何安装步骤）。
 
+### 自更新
+
+```bash
+onet update          # 检查并安装最新版本
+onet update -check   # 只检查，不下载
+onet update -force   # 已是最新版本时也重新安装
+onet version         # 查看当前版本
+```
+
+只替换二进制文件，不重启服务、不影响已有会话：更新完成后重启 onet 才生效（当前运行的进程继续用旧版本）。
+
+版本信息来自 GitHub Releases API（匿名限额 60 次/小时），设置 `GITHUB_TOKEN` 或 `GH_TOKEN` 可提高限额；受限网络用 `HTTPS_PROXY` 指定代理。源码构建的版本号是 `dev`，`onet update` 会直接安装最新发布版。
+
 ## 配置
 
 默认读取与二进制同目录的 `config.json`；不存在时使用全部默认值。参考 `config.example.json`：
