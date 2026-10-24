@@ -512,9 +512,9 @@ function initTerm() {
     cursorBlink: true,
     allowProposedApi: true,
     theme: {
-      background: '#0f0f13', foreground: '#e9e9ee',
-      cursor: '#e9e9ee', cursorAccent: '#0f0f13',
-      selectionBackground: '#365a9e', selectionInactiveBackground: '#2a3c5c',
+      background: '#08090b', foreground: '#e8eaed',
+      cursor: '#35e07f', cursorAccent: '#08090b',
+      selectionBackground: '#2a5c40', selectionInactiveBackground: '#1e3f2d',
     },
   });
   fit = new window.FitAddon.FitAddon();
