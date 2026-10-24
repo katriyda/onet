@@ -30,6 +30,18 @@
 - `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS
 - 新增操作一律走统一的 `showMenu()`：移动端底部操作表、桌面锚定浮层，同一套图标/文案/危险色，别再造第二套菜单
 
+## 热更新（自更新）
+
+网页 `⋯` → 检查更新走 `GET /update`；安装走 `POST /update`（必须带 `X-Onet-Update: 1`）。安装前会运行新二进制的 `version` 并比对 Release tag，避免把坏文件换上去。真正切换进程靠 `handoff_*.go`，不是原地热加载 Go 代码。
+
+- 交接状态是临时 JSON（0600），路径经 `ONET_HANDOFF_STATE` 传给新进程；会话快照含 PTY 句柄、回放缓冲、PID、启动时间。状态版本变化要同步改 `handoffStateVersion`
+- `Session.handoff` 为 true 时 `finishRun` 只停读，不 `Close` PTY、不标记 dead；旧进程退出前 `live` 仍保留。别在交接路径调用 `Close()`，否则 shell 被杀
+- Unix：`dup` PTY fd 并清 CLOEXEC → 停止旧读循环 → 写状态 → `exec`。exec 保留 PID，shell 仍是子进程，新进程用 `Wait4` 接管；`exec` 失败必须把 dup fd 接回旧 `unixPty` 并重启读循环
+- Windows：`HPCON` 是 `PseudoConsole*`，不是内核句柄，**不能 `DuplicateHandle`**。用 `ReadProcessMemory` 读内部 `hSignal`/`hPtyReference`/`hConPtyProcess`，逐个复制到子进程，再在子进程重建一个 `pseudoConsole` 结构作为 HPCON。`ClosePseudoConsole` 会 `HeapFree(HPCON)`，对 Go 分配的结构只能手动关三个句柄
+- Windows 监听 socket 与 IOCP 绑定，跨进程复制不可靠：父进程写最终状态后关闭 listener，子进程自己 `net.Listen`；失败时必须恢复旧 pump 并重新 `net.Listen`。握手是 stdin/stdout 的 `LOAD`/`READY`/`GO`/`SERVING`
+- 旧进程确认 `SERVING` 后才能断 WS 并退出；父进程正常退出路径**不能** `KillAll`。`main` 的 `handoffDone` 分支就是为此存在
+- 更新失败发生在停读之后时，Windows 用 `conptyConn.RestartRead()`、Unix 用 dup fd 恢复；这是回滚可用性的关键，别删
+
 ## 验证（完成定义）
 
 `go vet` + `go build` 通过是底线。行为改动**起服务端到端验证**，不能只看编译：
@@ -53,7 +65,7 @@
 
 ## 安全（硬线）
 
-默认 `127.0.0.1` 无认证；`token` 非空后 `/config`、`/ws` 强制认证。`/` 与 `/static/` 故意公开（登录页自举）；`/config` 不回传 token。传输明文 HTTP，TLS 交给反代/Tailscale。会话内是完整 shell——放宽监听/认证前必须先向用户说明风险并获确认。
+默认 `127.0.0.1` 无认证；`token` 非空后 `/config`、`/logs`、`/update`、`/ws` 强制认证。`/` 与 `/static/` 故意公开（登录页自举）；`/config` 不回传 token。`POST /update` 会替换当前二进制并切换进程，自定义头只防 CSRF，不是额外权限。传输明文 HTTP，TLS 交给反代/Tailscale。会话内是完整 shell——放宽监听/认证前必须先向用户说明风险并获确认。
 
 ## 协作
 

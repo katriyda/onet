@@ -25,6 +25,8 @@ type Pty interface {
 	Pid() int
 	Done() <-chan struct{}
 	ExitCode() int
+	// StopRead 只解除 Read 阻塞，不关闭 PTY、不终止子进程；用于热更新交接。
+	StopRead() error
 }
 
 // ---------- ringBuf：固定 64KB 环形缓冲 ----------
@@ -177,6 +179,7 @@ type Session struct {
 	exitCode      int
 	cols, rows    int
 	logIO         bool // 是否记录 PTY 原始输入/输出（log_terminal_io）
+	handoff       bool // true 时 Read 结束不关 PTY、不标记 dead（交给新进程）
 	onStateChange func()
 
 	spawn func(cols, rows int) (Pty, error)
@@ -214,8 +217,18 @@ func (s *Session) run(l *livePTY) {
 }
 
 // finishRun 收尾一代 PTY：关闭句柄、标记 dead、广播 exit。正常退出与 panic 共用。
+// 热更新交接期间 Read 被主动停止：保留 PTY 句柄供新进程接管，不标记 dead。
 func (s *Session) finishRun(l *livePTY, code int) {
 	p := l.pty
+
+	s.mu.Lock()
+	handoff := s.live == l && s.handoff
+	s.mu.Unlock()
+	if handoff {
+		appLog.Info("session.handoff_pause", "session", s.ID, "pid", p.Pid())
+		return
+	}
+
 	_ = p.Close()
 
 	s.mu.Lock()
@@ -280,7 +293,7 @@ var errSessionDead = fmt.Errorf("会话已退出")
 // 已死会话拒绝 attach。
 func (s *Session) Attach(c *Client) error {
 	s.mu.Lock()
-	if s.dead || s.live == nil {
+	if s.dead || s.live == nil || s.handoff {
 		s.mu.Unlock()
 		appLog.Warn("session.attach_rejected", "session", s.ID, "conn", c.logID(), "err", errSessionDead)
 		return errSessionDead
@@ -400,6 +413,38 @@ func (s *Session) Restart() error {
 	return nil
 }
 
+// suspendForHandoff 停止读取但保留 PTY 与 shell 进程，等待新进程接管。
+// 必须在 Manager.BeginHandoff 之后调用，避免与 Restart/Remove 竞争。
+func (s *Session) suspendForHandoff() {
+	s.mu.Lock()
+	l := s.live
+	if l == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.handoff = true
+	s.mu.Unlock()
+
+	if err := l.pty.StopRead(); err != nil {
+		appLog.Warn("session.handoff_stop_read", "session", s.ID, "pid", l.pty.Pid(), "err", err)
+	}
+	select {
+	case <-l.done:
+	case <-time.After(3 * time.Second):
+		appLog.Warn("session.handoff_stop_timeout", "session", s.ID, "pid", l.pty.Pid())
+	}
+}
+
+// startRestoredRead 在恢复 PTY 后启动读循环（仅由恢复流程调用一次）。
+func (s *Session) startRestoredRead() {
+	s.mu.Lock()
+	l := s.live
+	s.mu.Unlock()
+	if l != nil {
+		go s.run(l)
+	}
+}
+
 // terminate 终止进程并返回（不阻塞）。进程退出后 run 循环自行清理；
 // 若进程未在期限内退出，则强制 Close 兜底（同时解除 ConPTY 读阻塞）。
 func (s *Session) terminate(l *livePTY) {
@@ -447,6 +492,7 @@ type Manager struct {
 	seq      int
 	cfg      Config
 	onChange func() // server 回调：广播 sessions 列表
+	handoff  bool   // 热更新交接期间冻结会话增删/重启
 }
 
 func NewManager(cfg Config, onChange func()) *Manager {
@@ -457,34 +503,78 @@ func NewManager(cfg Config, onChange func()) *Manager {
 	}
 }
 
-// Create 新建会话。name 为空 → "sess-<seq>"。
-func (m *Manager) Create(name string) (*Session, error) {
-	id := name
-	if id == "" {
-		m.mu.Lock()
-		m.seq++
-		id = fmt.Sprintf("sess-%d", m.seq)
-		m.mu.Unlock()
-	}
-
+// BeginHandoff 冻结会话增删/重启；返回 false 表示已有交接在进行。
+func (m *Manager) BeginHandoff() bool {
 	m.mu.Lock()
-	if _, ok := m.sessions[id]; ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("会话 %q 已存在", id)
+	defer m.mu.Unlock()
+	if m.handoff {
+		return false
 	}
-	s := &Session{
+	m.handoff = true
+	return true
+}
+
+// EndHandoff 解除冻结（交接失败时回退）。
+func (m *Manager) EndHandoff() {
+	m.mu.Lock()
+	m.handoff = false
+	m.mu.Unlock()
+}
+
+// HandoffActive 返回是否正在做热更新交接。
+func (m *Manager) HandoffActive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.handoff
+}
+
+// sessionsSnapshot 按创建顺序返回会话指针副本。
+func (m *Manager) sessionsSnapshot() []*Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Session, 0, len(m.order))
+	for _, id := range m.order {
+		if s := m.sessions[id]; s != nil {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// newSession 构造会话对象（不启动 PTY）。id/name 的语义与 Create 一致。
+func (m *Manager) newSession(id, name string, cols, rows int) *Session {
+	return &Session{
 		ID:            id,
 		Name:          name,
 		clients:       make(map[*Client]struct{}),
 		buf:           newRingBuf(),
-		cols:          80,
-		rows:          24,
+		cols:          cols,
+		rows:          rows,
 		logIO:         m.cfg.LogTerminalIO,
 		onStateChange: m.onChange,
 		spawn: func(cols, rows int) (Pty, error) {
 			return spawnShell(m.cfg, id, cols, rows)
 		},
 	}
+}
+
+// Create 新建会话。name 为空 → "sess-<seq>"。
+func (m *Manager) Create(name string) (*Session, error) {
+	m.mu.Lock()
+	if m.handoff {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("正在更新，请稍后再试")
+	}
+	id := name
+	if id == "" {
+		m.seq++
+		id = fmt.Sprintf("sess-%d", m.seq)
+	}
+	if _, ok := m.sessions[id]; ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("会话 %q 已存在", id)
+	}
+	s := m.newSession(id, name, 80, 24)
 	m.sessions[id] = s
 	m.order = append(m.order, id)
 	m.mu.Unlock()
@@ -551,6 +641,11 @@ func (m *Manager) List() []SessionInfo {
 // Remove 杀掉进程并从列表删除。
 func (m *Manager) Remove(id string) {
 	m.mu.Lock()
+	if m.handoff {
+		m.mu.Unlock()
+		appLog.Warn("session.remove_blocked", "session", id, "reason", "handoff")
+		return
+	}
 	s := m.sessions[id]
 	existed := s != nil
 	if s != nil {
@@ -575,6 +670,10 @@ func (m *Manager) Remove(id string) {
 // Restart 重启指定会话（存活则先杀）。
 func (m *Manager) Restart(id string) error {
 	m.mu.Lock()
+	if m.handoff {
+		m.mu.Unlock()
+		return fmt.Errorf("正在更新，请稍后再试")
+	}
 	s := m.sessions[id]
 	m.mu.Unlock()
 	if s == nil {

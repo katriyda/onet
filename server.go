@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -30,10 +32,32 @@ type Server struct {
 	mgr     *Manager
 	mu      sync.Mutex
 	clients map[*Client]struct{}
+
+	addr    string
+	ln      net.Listener
+	httpSrv *http.Server
+
+	updateMu sync.Mutex
+	updating bool
+
+	handoffDone    chan struct{}
+	handoffOnce    sync.Once
+	handoffClosing atomic.Bool   // 主动关闭监听以让新进程 bind，Serve 返回不算错误
+	listenerGen    atomic.Uint64 // 监听代数：旧 Serve 的错误在重新监听后应忽略
+	handoffGuard   sync.Mutex
 }
 
 func NewServer(cfg Config) *Server {
-	return &Server{cfg: cfg, clients: make(map[*Client]struct{})}
+	return &Server{
+		cfg:         cfg,
+		clients:     make(map[*Client]struct{}),
+		handoffDone: make(chan struct{}),
+	}
+}
+
+// closeHandoff 只触发一次 main 的交接退出路径。
+func (s *Server) closeHandoff() {
+	s.handoffOnce.Do(func() { close(s.handoffDone) })
 }
 
 func (s *Server) routes() http.Handler {
@@ -43,6 +67,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/config", s.handleConfig)
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logs", s.handleLogs)
+	mux.HandleFunc("/update", s.handleUpdate)
 	mux.HandleFunc("/ws", s.handleWS)
 	return s.withAccessLog(mux)
 }
@@ -202,7 +227,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.cfg
 	cfg.Token = ""
-	writeJSON(w, cfg)
+	writeJSON(w, struct {
+		Config
+		Version string `json:"version"`
+	}{Config: cfg, Version: version})
 }
 
 type loginReq struct {
@@ -337,7 +365,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	appLog.Info("ws.open", "conn", client.logID(), "remote", r.RemoteAddr, "ua", r.UserAgent())
 	// 先告知客户端连接标识，浏览器日志据此关联到同一连接。
-	client.write(mustJSON(helloMsg{Type: "hello", Conn: client.logID()}))
+	client.write(mustJSON(helloMsg{Type: "hello", Conn: client.logID(), Version: version}))
 
 	var attached *Session
 	var closeErr error
@@ -427,6 +455,13 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 		"conn", client.logID(), "cmd", cmd.Type,
 		"session", cmd.ID, "name", cmd.Name, "cols", cmd.Cols, "rows", cmd.Rows)
 
+	if s.mgr.HandoffActive() {
+		switch cmd.Type {
+		case "create", "restart", "kill", "remove":
+			return cmdErr(client, cmd.Type, "正在更新，请稍后再试")
+		}
+	}
+
 	switch cmd.Type {
 	case "list":
 		return mustJSON(sessionsMsg{Type: "sessions", Sessions: s.mgr.List()})
@@ -499,6 +534,34 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 	}
 }
 
+// closeClients 立即断开所有 WS 连接（交接/退出时使用，浏览器会自动重连）。
+func (s *Server) closeClients() {
+	s.mu.Lock()
+	clients := make([]*Client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.Unlock()
+	for _, c := range clients {
+		_ = c.conn.CloseNow()
+	}
+	appLog.Info("ws.close_all", "clients", len(clients))
+}
+
+// broadcastNotice 向所有在线页面推送一条提示（更新失败等）。
+func (s *Server) broadcastNotice(level, message string) {
+	frame := mustJSON(noticeMsg{Type: "notice", Level: level, Message: message})
+	s.mu.Lock()
+	clients := make([]*Client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.Unlock()
+	for _, c := range clients {
+		c.write(frame)
+	}
+}
+
 // broadcastSessions 向所有连接广播会话列表（Manager 增删改回调）。
 func (s *Server) broadcastSessions() {
 	list := s.mgr.List()
@@ -537,10 +600,17 @@ type detachedMsg struct {
 	Type string `json:"type"`
 }
 
-// helloMsg 连接建立后的第一帧：告知客户端日志标识。
+// helloMsg 连接建立后的第一帧：告知客户端日志标识与当前版本。
 type helloMsg struct {
-	Type string `json:"type"` // "hello"
-	Conn string `json:"conn"` // "c1"
+	Type    string `json:"type"` // "hello"
+	Conn    string `json:"conn"` // "c1"
+	Version string `json:"version"`
+}
+
+type noticeMsg struct {
+	Type    string `json:"type"` // "notice"
+	Level   string `json:"level"`
+	Message string `json:"message"`
 }
 
 type errorMsg struct {

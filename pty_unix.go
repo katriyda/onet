@@ -18,6 +18,7 @@ import (
 type unixPty struct {
 	cmd  *exec.Cmd
 	f    *os.File
+	pid  int
 	done chan struct{}
 
 	once     sync.Once
@@ -76,6 +77,7 @@ func spawnShell(cfg Config, name string, cols, rows int) (Pty, error) {
 	c := &unixPty{
 		cmd:  cmd,
 		f:    f,
+		pid:  cmd.Process.Pid,
 		done: make(chan struct{}),
 	}
 	go c.waitLoop()
@@ -88,6 +90,22 @@ func (c *unixPty) waitLoop() {
 	c.waitErr = c.cmd.Wait()
 	if c.cmd.ProcessState != nil {
 		c.exitCode = c.cmd.ProcessState.ExitCode()
+	}
+	close(c.done)
+}
+
+// waitInherited 在 exec 后的新进程里等待仍然存活的 shell 子进程。
+// exec 保留 PID，因此 shell 仍是本进程的直接子进程，可以直接 Wait4。
+func (c *unixPty) waitInherited(pid int) {
+	if pid > 0 {
+		var ws syscall.WaitStatus
+		if _, err := syscall.Wait4(pid, &ws, 0, nil); err == nil {
+			if ws.Exited() {
+				c.exitCode = ws.ExitStatus()
+			} else if ws.Signaled() {
+				c.exitCode = -1
+			}
+		}
 	}
 	close(c.done)
 }
@@ -113,10 +131,7 @@ func (c *unixPty) Close() error {
 }
 
 func (c *unixPty) Pid() int {
-	if c.cmd == nil || c.cmd.Process == nil {
-		return 0
-	}
-	return c.cmd.Process.Pid
+	return c.pid
 }
 
 func (c *unixPty) ExitCode() int {
@@ -147,14 +162,22 @@ func (c *unixPty) Kill() error {
 		return nil
 	default:
 	}
-	if c.cmd == nil || c.cmd.Process == nil {
+	if c.pid <= 0 {
 		return nil
 	}
-	pid := c.cmd.Process.Pid
-	if err := syscall.Kill(-pid, syscall.SIGHUP); err == nil {
+	if err := syscall.Kill(-c.pid, syscall.SIGHUP); err == nil {
 		return nil
 	}
-	return c.cmd.Process.Kill()
+	if c.cmd != nil && c.cmd.Process != nil {
+		return c.cmd.Process.Kill()
+	}
+	return syscall.Kill(c.pid, syscall.SIGKILL)
+}
+
+// StopRead 关闭旧进程持有的 master fd 以解除 Read 阻塞。
+// 交接时新进程已持有 dup 出来的 fd，因此不会触发 SIGHUP。
+func (c *unixPty) StopRead() error {
+	return c.f.Close()
 }
 
 func (c *unixPty) Done() <-chan struct{} {

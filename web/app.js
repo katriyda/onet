@@ -4,6 +4,11 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const versionLabel = (v) => {
+  if (!v) return '';
+  const s = String(v);
+  return s === 'dev' ? 'dev' : 'v' + s.replace(/^v/i, '');
+};
 const icon = (name, cls = '') =>
   `<svg class="icon ${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
@@ -24,6 +29,7 @@ let reconnectTimer = null;
 let disconnected = false;
 let modState = { ctrl: 0, alt: 0 }; // 0=off 1=点按(仅下一次) 2=长按锁定
 let unseenOutput = false;
+let serverVersion = '';
 
 let xtermViewport = null;
 let lastFitKey = '';
@@ -288,8 +294,10 @@ async function boot() {
   }
 
   cfg = await resp.json();
+  serverVersion = cfg.version || '';
   logEvent('info', 'client.config.loaded',
-    'ui=' + cfg.ui + ' scrollback=' + cfg.scrollback + ' font_size=' + cfg.font_size);
+    'ui=' + cfg.ui + ' scrollback=' + cfg.scrollback + ' font_size=' + cfg.font_size +
+    ' version=' + serverVersion);
   applyMode();
   initTerm();
   connectWS();
@@ -1014,7 +1022,17 @@ function handleMsg(buf) {
   switch (msg.type) {
     case 'hello':
       serverConnId = msg.conn || '';
-      logEvent('info', 'client.hello', 'conn=' + serverConnId);
+      logEvent('info', 'client.hello', 'conn=' + serverConnId + ' version=' + (msg.version || ''));
+      if (msg.version) {
+        if (serverVersion && msg.version !== serverVersion) {
+          showToast('已更新到 ' + versionLabel(msg.version), 3500);
+        }
+        serverVersion = msg.version;
+      }
+      break;
+    case 'notice':
+      logEvent(msg.level === 'error' ? 'error' : 'info', 'client.notice', msg.message || '');
+      showToast(msg.message || '服务端提示', 4000);
       break;
     case 'output': {
       const id = current ? current.id : (pendingAttach && pendingAttach.id);
@@ -1601,6 +1619,12 @@ function terminalMenu() {
   });
   items.push({ type: 'separator' });
   items.push({ label: '日志', icon: 'file', fn: openLogs });
+  items.push({
+    label: '检查更新',
+    icon: 'download',
+    hint: versionLabel(serverVersion),
+    fn: checkUpdate,
+  });
   return items;
 }
 
@@ -1609,6 +1633,74 @@ function sessionMenu(s) {
   if (s.dead) items.push({ label: '重启会话', icon: 'refresh', fn: () => restartSession(s.id) });
   items.push({ label: '删除会话', icon: 'trash', danger: true, fn: () => removeSession(s.id) });
   return items;
+}
+
+/* ---------------- 自更新 ---------------- */
+async function checkUpdate() {
+  logEvent('info', 'client.update.check', 'current=' + serverVersion);
+  showToast('正在检查更新…', 5000);
+  let resp;
+  try {
+    resp = await fetch('/update', { cache: 'no-store' });
+  } catch (err) {
+    logEvent('error', 'client.update.check_failed', (err && err.message) || String(err));
+    showToast('检查更新失败: 无法连接服务器', 4000);
+    return;
+  }
+  if (resp.status === 401) { showLogin(); return; }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    logEvent('warn', 'client.update.check_error', data.error || ('status=' + resp.status));
+    showToast(data.error || ('检查更新失败 (' + resp.status + ')'), 4500);
+    return;
+  }
+  if (!data.available) {
+    showToast('已是最新版本 ' + versionLabel(data.current || serverVersion), 3000);
+    return;
+  }
+  logEvent('info', 'client.update.available', 'current=' + data.current + ' latest=' + data.latest);
+  showMenu([
+    { label: '取消', fn: () => {} },
+    {
+      label: '安装 ' + versionLabel(data.latest) + ' 并重启',
+      icon: 'download',
+      fn: () => installUpdate(data.latest),
+    },
+  ], {
+    sheet: mode === 'mobile',
+    title: '发现新版本',
+    message: '当前 ' + versionLabel(data.current) + ' → ' + versionLabel(data.latest) + '；正在运行的会话会保留',
+  });
+}
+
+async function installUpdate(latest) {
+  logEvent('info', 'client.update.install', 'latest=' + latest);
+  showToast('正在下载并安装 ' + versionLabel(latest) + '…', 120000);
+  let resp;
+  try {
+    resp = await fetch('/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Onet-Update': '1' },
+      body: '{}',
+    });
+  } catch (err) {
+    logEvent('error', 'client.update.install_failed', (err && err.message) || String(err));
+    showToast('更新请求失败，请检查服务端日志', 5000);
+    return;
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401) { showLogin(); return; }
+  if (!resp.ok) {
+    logEvent('warn', 'client.update.install_error', data.error || ('status=' + resp.status));
+    showToast(data.error || ('更新失败 (' + resp.status + ')'), 5000);
+    return;
+  }
+  if (!data.updated) {
+    showToast('已是最新版本', 3000);
+    return;
+  }
+  logEvent('info', 'client.update.restarting', 'from=' + data.from + ' to=' + data.to);
+  showToast('已安装 ' + versionLabel(data.to) + '，正在切换进程…', 15000);
 }
 
 function toggleKeys() {

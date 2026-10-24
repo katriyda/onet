@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -50,9 +51,18 @@ type startupInfoEx struct {
 }
 
 // conptyConn 是一个 ConPTY 会话，实现 Pty 接口。
+// pseudoConsole 对应 winconpty.h 中的 PseudoConsole ABI（HPCON 实际指向它）。
+// 热更新时 HPCON 本身不能跨进程复制，只能复制其中的三个内核句柄。
+type pseudoConsole struct {
+	hSignal        windows.Handle
+	hPtyReference  windows.Handle
+	hConPtyProcess windows.Handle
+}
+
 type conptyConn struct {
-	hpc windows.Handle
-	pi  windows.ProcessInformation
+	hpc       windows.Handle
+	inherited *pseudoConsole // 非 nil 表示 hpc 指向本进程内重建的结构
+	pi        windows.ProcessInformation
 
 	// ptyIn/ptyOut 是伪控制台侧的管道句柄，会话期间必须保持打开。
 	ptyIn  windows.Handle
@@ -61,12 +71,13 @@ type conptyConn struct {
 	cmdInFile  *os.File
 	cmdOutFile *os.File
 
-	pending  []byte // Read 尚未消费完的剩余字节
-	outCh    chan []byte
-	outOnce  sync.Once
-	done     chan struct{}
-	pumpDone chan struct{}
-	exitCode int
+	pending     []byte // Read 尚未消费完的剩余字节
+	outCh       chan []byte
+	outOnce     sync.Once
+	done        chan struct{}
+	pumpDone    chan struct{}
+	exitCode    int
+	readStopped atomic.Bool
 
 	closeOnce        sync.Once
 	closeConsoleOnce sync.Once
@@ -92,6 +103,10 @@ func (c *conptyConn) pump() {
 	buf := make([]byte, 8192)
 	closeOut := func() { c.outOnce.Do(func() { close(c.outCh) }) }
 	for {
+		if c.readStopped.Load() {
+			closeOut()
+			return
+		}
 		n, err := c.cmdOutFile.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
@@ -104,6 +119,10 @@ func (c *conptyConn) pump() {
 			}
 		}
 		if err != nil {
+			closeOut()
+			return
+		}
+		if c.readStopped.Load() {
 			closeOut()
 			return
 		}
@@ -272,6 +291,50 @@ func newConptyConn(app, cwd string, cols, rows int) (*conptyConn, error) {
 	return c, nil
 }
 
+// newInheritedConpty 用热更新复制过来的句柄重建 ConPTY 对象。
+// 句柄归属新进程；Close 时按正常生命周期关闭。
+func newInheritedConpty(hs handoffSession) (Pty, error) {
+	if len(hs.Handles) < 8 {
+		return nil, fmt.Errorf("会话 %s 缺少 ConPTY 句柄", hs.ID)
+	}
+	pc := &pseudoConsole{
+		hSignal:        windows.Handle(hs.Handles[0]),
+		hPtyReference:  windows.Handle(hs.Handles[1]),
+		hConPtyProcess: windows.Handle(hs.Handles[2]),
+	}
+	c := &conptyConn{
+		hpc:        windows.Handle(uintptr(unsafe.Pointer(pc))),
+		inherited:  pc,
+		ptyIn:      windows.Handle(hs.Handles[3]),
+		ptyOut:     windows.Handle(hs.Handles[4]),
+		cmdInFile:  os.NewFile(uintptr(hs.Handles[5]), "conpty-in"),
+		cmdOutFile: os.NewFile(uintptr(hs.Handles[6]), "conpty-out"),
+		pi: windows.ProcessInformation{
+			Process:   windows.Handle(hs.Handles[7]),
+			ProcessId: uint32(hs.PID),
+		},
+		outCh:    make(chan []byte, 64),
+		done:     make(chan struct{}),
+		pumpDone: make(chan struct{}),
+	}
+	if c.cmdInFile == nil || c.cmdOutFile == nil || c.pi.Process == 0 ||
+		pc.hSignal == 0 || pc.hPtyReference == 0 {
+		return nil, fmt.Errorf("会话 %s 的 ConPTY 句柄无效", hs.ID)
+	}
+	go c.waitLoop()
+	go c.pump()
+	go func() {
+		<-c.done
+		c.closeConsole()
+		select {
+		case <-c.pumpDone:
+		case <-time.After(200 * time.Millisecond):
+			_ = windows.CancelIoEx(windows.Handle(c.cmdOutFile.Fd()), nil)
+		}
+	}()
+	return c, nil
+}
+
 // ---------- Pty 接口实现 ----------
 
 func (c *conptyConn) Read(p []byte) (int, error) {
@@ -305,18 +368,85 @@ func (c *conptyConn) Close() error {
 		}
 		_ = c.cmdInFile.Close()
 		_ = c.cmdOutFile.Close()
-		_ = windows.CloseHandle(c.pi.Process)
-		_ = windows.CloseHandle(c.pi.Thread)
-		_ = windows.CloseHandle(c.ptyIn)
-		_ = windows.CloseHandle(c.ptyOut)
+		if c.pi.Process != 0 {
+			_ = windows.CloseHandle(c.pi.Process)
+		}
+		if c.pi.Thread != 0 {
+			_ = windows.CloseHandle(c.pi.Thread)
+		}
+		if c.ptyIn != 0 {
+			_ = windows.CloseHandle(c.ptyIn)
+		}
+		if c.ptyOut != 0 {
+			_ = windows.CloseHandle(c.ptyOut)
+		}
 	})
 	return nil
 }
 
 func (c *conptyConn) closeConsole() {
 	c.closeConsoleOnce.Do(func() {
-		_, _, _ = procClosePseudoConsole.Call(uintptr(c.hpc))
+		if c.inherited != nil {
+			for _, h := range []windows.Handle{
+				c.inherited.hSignal,
+				c.inherited.hPtyReference,
+				c.inherited.hConPtyProcess,
+			} {
+				if h != 0 {
+					_ = windows.CloseHandle(h)
+				}
+			}
+			c.inherited.hSignal = 0
+			c.inherited.hPtyReference = 0
+			c.inherited.hConPtyProcess = 0
+			return
+		}
+		if c.hpc != 0 {
+			_, _, _ = procClosePseudoConsole.Call(uintptr(c.hpc))
+		}
 	})
+}
+
+// StopRead 取消挂起的 ReadFile，让 pump 退出并关闭 outCh；不关闭控制台/句柄。
+// CancelIoEx 只取消调用瞬间已挂起的 IO，因此循环重试直到 pump 真正退出。
+func (c *conptyConn) StopRead() error {
+	c.readStopped.Store(true)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_ = windows.CancelIoEx(windows.Handle(c.cmdOutFile.Fd()), nil)
+		select {
+		case <-c.pumpDone:
+			return nil
+		case <-c.done:
+			return nil
+		default:
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("停止 ConPTY 读取超时")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// RestartRead 在交接失败时重新启动 pump，继续使用原 ConPTY 句柄。
+func (c *conptyConn) RestartRead() error {
+	select {
+	case <-c.done:
+		return io.EOF
+	default:
+	}
+	select {
+	case <-c.pumpDone:
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("旧 pump 未退出，无法恢复读取")
+	}
+	c.pending = nil
+	c.outCh = make(chan []byte, 64)
+	c.pumpDone = make(chan struct{})
+	c.outOnce = sync.Once{}
+	c.readStopped.Store(false)
+	go c.pump()
+	return nil
 }
 
 func (c *conptyConn) Resize(cols, rows int) error {
