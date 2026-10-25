@@ -443,7 +443,7 @@ function detectMode() {
   return fineWide ? 'desktop' : 'mobile';
 }
 
-function applyMode() {
+function applyMode(smooth = false) {
   if (!cfg) return;
   const next = detectMode();
   const changed = next !== mode;
@@ -459,7 +459,7 @@ function applyMode() {
     if (term) renderKeys();
   }
   updateKeysVisibility();
-  scheduleLayout();
+  scheduleLayout(smooth);
 }
 
 function updateKeysVisibility() {
@@ -469,21 +469,43 @@ function updateKeysVisibility() {
   scheduleLayout();
 }
 
-matchMedia('(pointer: coarse)').addEventListener('change', applyMode);
-matchMedia('(pointer: fine)').addEventListener('change', applyMode);
-window.addEventListener('resize', () => { if (cfg) applyMode(); });
+matchMedia('(pointer: coarse)').addEventListener('change', () => applyMode());
+matchMedia('(pointer: fine)').addEventListener('change', () => applyMode());
+window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 
 /* ---------------- 布局 / 尺寸 ---------------- */
+// 软键盘弹起/收起时，可视区高度是一帧一帧变的。以前每帧都 fit 一次：xterm
+// 每跨过一个字符高度就 reflow 一次，还会把中间尺寸发给 PTY（ConPTY 重排 +
+// shell 重绘），视觉上就是“卡一下、跳一行”。
+// 现在：高度变化期间冻结 xterm 尺寸，只平移 #term 让底边贴着可视区连续滑动；
+// 尺寸稳定 VP_SETTLE_MS 后再一次性 fit + resize。行数没变 → 不动画。
+const VP_SETTLE_MS = 140;
+const VP_EASE = 0.5;           // 大跳变时每帧逼近目标的比例（~4 帧收敛）
+const VP_FOLLOW_PX = 48;       // 单次变化小于此值：直接贴住键盘边（不产生滞后）
+const coarsePointer = matchMedia('(pointer: coarse)');
+
 let layoutRaf = 0;
-function scheduleLayout() {
+let layoutSmooth = false;
+let termHeight = 0;            // 最近一次布局后 #term 的高度
+let vpFrozenH = 0;             // 冻结期间 #term 的像素高度（0 = 未冻结）
+let vpPan = false;             // 是否把底边钉在可视区底部（缓冲区未填满时不钉）
+let vpTarget = 0;              // 目标位移（让底边贴住 term-wrap 底边）
+let vpOffset = 0;              // 当前位移
+let vpRaf = 0;
+let vpSettleTimer = 0;
+
+function scheduleLayout(smooth = false) {
+  if (smooth) layoutSmooth = true;
   if (layoutRaf) return;
   layoutRaf = requestAnimationFrame(() => {
     layoutRaf = 0;
-    layout();
+    const s = layoutSmooth;
+    layoutSmooth = false;
+    layout(s);
   });
 }
 
-function layout() {
+function layout(smooth = false) {
   const vv = window.visualViewport;
   if (vv) {
     app.style.height = vv.height + 'px';
@@ -494,12 +516,126 @@ function layout() {
     document.documentElement.style.removeProperty('--vv-top');
     document.documentElement.style.removeProperty('--vvh');
   }
-  fitTerm();
+  syncViewport(smooth);
   updateScrollPill();
+}
+
+function viewportHeight() {
+  // 冻结期间 #term 的高度是内联固定的，必须看父容器（#term-wrap）的可用高度。
+  const wrap = termEl.parentElement;
+  return wrap ? wrap.clientHeight : termEl.clientHeight;
+}
+
+// 只有内容铺满屏幕且停在底部时，终端才在视觉上“底边钉住”；
+// 短缓冲区（提示符在顶部、下面全是空白）平移会把可见内容推出屏幕。
+// 用缓冲区坐标判断：此时容器可能已经缩小，像素级 atBottom() 会误判。
+function bufferAtBottom() {
+  try { const b = term.buffer.active; return b.viewportY >= b.baseY; } catch { return true; }
+}
+
+function canAnchorBottom() {
+  try {
+    const b = term.buffer.active;
+    if (b.viewportY < b.baseY) return false;
+    if (isAltBuffer()) return true;
+    return b.baseY > 0 || b.cursorY >= term.rows - 1;
+  } catch { return false; }
+}
+
+function syncViewport(smooth) {
+  const h = viewportHeight();
+  if (!term || !fit) { termHeight = h; return; }
+
+  if (!vpFrozenH) {
+    // 只有触屏设备（软键盘）走平滑路径；鼠标拖拽窗口保持逐帧 fit。
+    if (!smooth || !coarsePointer.matches || !termHeight || h === termHeight) {
+      termHeight = h;
+      fitTerm();
+      return;
+    }
+    vpFrozenH = termHeight;
+    vpPan = canAnchorBottom();
+    vpTarget = vpOffset = 0;
+    termEl.style.height = vpFrozenH + 'px';
+    if (vpPan) termEl.style.willChange = 'transform';
+    logEvent('debug', 'client.vp.freeze', 'h=' + vpFrozenH + ' pan=' + vpPan);
+  }
+
+  if (h !== termHeight || !vpSettleTimer) {
+    clearTimeout(vpSettleTimer);
+    vpSettleTimer = setTimeout(commitViewport, VP_SETTLE_MS);
+  }
+  termHeight = h;
+  if (!vpPan) return;          // 短缓冲区/已滚回：保持顶部对齐，只冻结行数
+  const nextTarget = h - vpFrozenH;
+  const delta = Math.abs(nextTarget - vpTarget);
+  vpTarget = nextTarget;
+  if (delta <= VP_FOLLOW_PX) {
+    // 键盘动画的逐帧事件：直接贴住，不能有跟随滞后（否则底部行会被键盘边裁掉）。
+    if (vpRaf) { cancelAnimationFrame(vpRaf); vpRaf = 0; }
+    vpOffset = vpTarget;
+    applyViewportTransform();
+  } else {
+    // 视口一次性跳变（粗粒度 resize）：短缓动跟上，避免“瞬间移动”。
+    stepViewport();
+  }
+}
+
+function applyViewportTransform() {
+  termEl.style.transform = 'translate3d(0,' + vpOffset.toFixed(2) + 'px,0)';
+}
+
+// 位移用 rAF 缓动而不是 CSS transition：每帧都有新目标时不会被重置，
+// 提交前也能保证已经收敛到目标位置，不会在 fit 时再抖一下。
+function stepViewport() {
+  if (!vpFrozenH || vpRaf) return;
+  vpRaf = requestAnimationFrame(vpStep);
+}
+
+function vpStep() {
+  vpRaf = 0;
+  if (!vpFrozenH) return;
+  const diff = vpTarget - vpOffset;
+  if (Math.abs(diff) < 0.5) {
+    if (vpOffset === vpTarget) return;
+    vpOffset = vpTarget;
+  } else {
+    vpOffset += diff * VP_EASE;
+  }
+  applyViewportTransform();
+  if (vpOffset !== vpTarget) vpRaf = requestAnimationFrame(vpStep);
+}
+
+function endViewportFreeze() {
+  if (!vpFrozenH) return false;
+  if (vpRaf) { cancelAnimationFrame(vpRaf); vpRaf = 0; }
+  clearTimeout(vpSettleTimer);
+  vpSettleTimer = 0;
+  vpFrozenH = 0;
+  vpPan = false;
+  vpTarget = vpOffset = 0;
+  termEl.style.height = '';
+  termEl.style.transform = '';
+  termEl.style.willChange = '';
+  return true;
+}
+
+function commitViewport() {
+  if (!vpFrozenH) return;
+  const atEnd = bufferAtBottom();
+  const panned = vpPan;
+  endViewportFreeze();
+  lastFitKey = '';
+  fitTerm(true);               // 触发 term.onResize → 延迟 80ms 发一次 resize
+  termHeight = viewportHeight();
+  logEvent('debug', 'client.vp.commit', 'h=' + termHeight + ' atBottom=' + atEnd + ' pan=' + panned);
+  if (atEnd) scrollToBottom();
+  else updateScrollPill();
 }
 
 function fitTerm(force = false) {
   if (!fit || !term) return;
+  if (vpFrozenH) return;       // 冻结期间保持行数，等 commit 再算
   const key = termEl.clientWidth + 'x' + termEl.clientHeight + 'x' + term.options.fontSize;
   if (!force && key === lastFitKey) return;
   lastFitKey = key;
@@ -508,6 +644,7 @@ function fitTerm(force = false) {
 
 function sendResize() {
   if (!current || !term) return;
+  if (vpFrozenH) return;       // 中间尺寸不发给 PTY，commit 后会再排一次
   sendCmd({ type: 'resize', id: current.id, cols: term.cols, rows: term.rows });
 }
 
@@ -698,8 +835,9 @@ function initTerm() {
   layout();
 
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', scheduleLayout);
-    window.visualViewport.addEventListener('scroll', scheduleLayout);
+    // 键盘动画期间 height 每帧变：走冻结 + 平移；scroll 只改 offsetTop，不 fit。
+    window.visualViewport.addEventListener('resize', () => scheduleLayout(true));
+    window.visualViewport.addEventListener('scroll', () => scheduleLayout());
   }
 }
 
@@ -708,10 +846,12 @@ function setFontSize(n, opts = {}) {
   const fs = clamp(Math.round(n), 8, 32);
   if (fs === term.options.fontSize) return;
   logEvent('debug', 'client.font', 'size=' + fs);
+  endViewportFreeze();
   term.options.fontSize = fs;
   localStorage.setItem('onet_font', String(fs));
   lastFitKey = '';
   fitTerm();
+  termHeight = viewportHeight();
   scheduleResize();
   if (!opts.quiet) showToast('字号 ' + fs, 900);
 }

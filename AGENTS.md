@@ -27,6 +27,8 @@
 - 阻止默认后 `:active` 不可靠 → 反馈用 `.pressed` class
 - `modState` 键名小写；`dataset.key` 映射前先 `toLowerCase()`（历史 bug）
 - 布局跟 `visualViewport`，键盘弹起时重排并 resize；固定层（抽屉/底部菜单）用 `--vv-top`/`--vvh`，否则会被软键盘盖住
+- **移动端视口高度变化必须走冻结/提交路径**（`syncViewport`/`commitViewport`）：键盘动画期间 `#term` 用内联高度冻结行数、`translate3d` 让底边贴住可视区；高度稳定 `VP_SETTLE_MS` 后才 `fit + resize`。别改回每帧 `fit.fit()`——那会逐行 reflow 并把中间 cols/rows 发给 ConPTY，观感是“卡一下跳一行”；`fitTerm`/`sendResize` 在冻结期间的早退是故意的
+- 桌面模式（鼠标窗口拖拽）不走冻结路径，保持逐帧 fit；判断依据是 `(pointer: coarse)`（触屏），别改成按布局模式或删掉——窄窗口 + 鼠标会因此丢掉实时重排
 - `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS
 - 会话恢复顺序：URL `?s=` > `localStorage.onet_last_session` > `sessionStorage` 兜底。只在 `attached` 后写记录；Android WebView 刷新经常回退到 `/`（丢掉 `?s=`）且 `sessionStorage` 不跨实例，改用 localStorage 才能留在原会话，别改回只用 sessionStorage
 - 新增操作一律走统一的 `showMenu()`：移动端底部操作表、桌面锚定浮层，同一套图标/文案/危险色，别再造第二套菜单
