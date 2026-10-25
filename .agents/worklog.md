@@ -79,3 +79,20 @@
 - 产出: web/app.js、web/index.html、README.md、AGENTS.md；提交 a4863fe；tag v0.3.1（Release 8 资产）；线上实例已更新
 - 结果: 完成。旧 WebView 页面需刷新一次加载 v19（首刷可能仍读旧 sessionStorage/URL，attach 后即写入 localStorage，此后刷新稳定留在当前会话）
 - meta: commit=a4863fe tag=v0.3.1 files=web/app.js,web/index.html,README.md,AGENTS.md,.agents/worklog.md
+
+## 2026-10-25 14:44 — 官网 docs/site 与 GitHub Pages
+- session: s-20261025-docssite
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 为 onet 建一个终端风格的英文官网，放在仓库 `docs/site`，发布到 GitHub Pages，并提供带 SHA256 校验的 Linux/macOS/FreeBSD 与 Windows 一键安装脚本
+- 做了什么:
+  - 新增 `docs/site/`：单页 `index.html`（hero/why/install/interface/config/security/updates）、`style.css`（复用 `web/style.css` 的色板、方角、48px 网格、等宽字体）、`script.js`（复制按钮 + 年份）、`favicon.svg`；无外部请求、无框架、无 Web 字体
+  - 新增 `docs/site/install.sh`（POSIX sh）：OS/arch 映射 6 个 tar.gz，下载后按 release `checksums.txt` 校验，`cp`+`mv` 原子替换，`-v/-d/-h` 与环境变量，PATH 提示；旧 release 无校验文件时警告继续
+  - 新增 `docs/site/install.ps1`（5.1+）：zip 下载/校验（.NET SHA256，避开本机 PSModulePath 里 PS7 模块导致的 `Get-FileHash` 缺失）、解压、运行中进程检查、用户 PATH 追加、版本自检；临时目录 finally 清理
+  - `.github/workflows/release.yml` 在 artifact 合并后生成 `sha256sum onet-* > checksums.txt`；为 v0.3.1 补传 `checksums.txt`（8 行），`releases/latest/download/checksums.txt` 可访问
+  - 用隔离实例（127.0.0.1:7682，`-X main.version=0.3.1`）真实截取桌面 1440×900 与移动 390×844 界面，避免触碰 7681 上的用户会话；截图 `-strip` 后 92KB / 106KB
+  - 新增 `.github/workflows/pages.yml`（configure/upload/deploy-pages，路径过滤 `docs/site/**`），用 `gh api -X POST repos/katriyda/onet/pages -f build_type=workflow` 开通 Pages；README 标题下加官网链接
+- 产出: docs/site/{index.html,style.css,script.js,favicon.svg,install.sh,install.ps1,assets/desktop.png,assets/mobile.png}、.github/workflows/pages.yml、.github/workflows/release.yml、README.md；提交 470d13b、93a41f2；Pages 已开通（build_type=workflow）
+- 结果: 完成。`sh -n`/help/缺参退出 2 通过；容器内 `install.sh` 装出 0.3.1（校验无警告）、`-v v0.2.0` 走警告路径并装出 0.2.0；Windows 安装器装出 0.3.1；本地 Chromium 验证标题/6 个导航锚点/图片加载/复制到剪贴板/零 console 错误/仅同源请求，390×844 无横向溢出、导航可横滑；CI 与 Pages 均绿；线上 `https://katriyda.github.io/onet/` 校验通过，`install.ps1` 被 Pages 以 `application/octet-stream` 返回，Windows 命令改用 `raw.githubusercontent.com/.../install.ps1`（text/plain），重新部署后线上 `curl | sh` 与 `irm | iex` 均装出 0.3.1
+- meta: commit=93a41f2 files=docs/site/index.html,docs/site/style.css,docs/site/script.js,docs/site/favicon.svg,docs/site/install.sh,docs/site/install.ps1,docs/site/assets/desktop.png,docs/site/assets/mobile.png,.github/workflows/pages.yml,.github/workflows/release.yml,README.md,.agents/worklog.md
+
