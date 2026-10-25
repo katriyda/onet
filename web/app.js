@@ -477,12 +477,16 @@ window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 // 软键盘弹起/收起时，可视区高度是一帧一帧变的。以前每帧都 fit 一次：xterm
 // 每跨过一个字符高度就 reflow 一次，还会把中间尺寸发给 PTY（ConPTY 重排 +
 // shell 重绘），视觉上就是“卡一下、跳一行”。
-// 现在：高度变化期间冻结 xterm 尺寸，直接把 #term 平移到新位置让底边贴住可视区
-// （不做缓动：键盘本身就是一次跳变，动画只会被看成“又滚了一下”）；
+// 现在：高度变化期间冻结 xterm 尺寸，并把 #term 的位移补成一段与 IME 大致同长的
+// ease-out（见 VP_ANIM_MS），让底边“跟着键盘”滑到新位置；
 // 尺寸稳定 VP_SETTLE_MS 后再一次性 fit + resize。行数没变 → 不动画。
-// 提交要早：键盘动画本身通常 200–300ms，提交（本地重排 + 80ms 后的 PTY resize +
-// 应用重绘）必须落在这段动画里，否则应用那次重绘会在键盘停稳之后单独“抽动一下”。
+// 提交要早：键盘动画本身通常 200–300ms，提交（本地重排 + 40ms 后的 PTY resize +
+// 应用重绘）必须落在这段动画里，否则应用那次重绘会在键盘停稳之后单独“再动一下”。
+// 手机一般只上报一次最终高度（`n=1`），拿不到键盘的逐帧位置，所以平移自己补一段
+// 与 IME 大致同长的 ease-out 动画：不然 290px 的位移在同一帧完成，看着就是“内容
+// 滚了一下”。提交必须等这段动画走完，否则移除 transform 的瞬间会再跳一格。
 const VP_SETTLE_MS = 60;
+const VP_ANIM_MS = 190;
 const BOTTOM_INTENT_MS = 2000; // 触摸开始时在底部 → 这段时间内的视口变化仍锚底
 const coarsePointer = matchMedia('(pointer: coarse)');
 
@@ -494,6 +498,12 @@ let vpPan = false;             // 是否把底边钉在可视区底部（缓冲�
 let vpSettleTimer = 0;
 let vpChanges = 0;             // 本次冻结内高度变了多少次（诊断：真机是否逐帧上报）
 let vpFirstChangeAt = 0;       // 本次冻结第一次高度变化的时刻
+let vpOffset = 0;              // 当前平移量
+let vpFrom = 0;                // 本轮动画起点
+let vpTo = 0;                  // 本轮动画终点
+let vpAnimAt = 0;              // 本轮动画起始时刻
+let vpAnim = 0;                // 动画 rAF
+let vpCommitPending = false;   // 提交撞上动画：等动画收尾再提交
 let bottomIntentAt = 0;        // 用户最近一次在底部点击/聚焦的时间，0 = 无意图
 let vpForceBottom = false;     // 本次冻结是否来自“底部意图”
 let anchorSeq = 0;             // 取消延后锚定的令牌
@@ -601,17 +611,39 @@ function syncViewport(smooth) {
   }
   termHeight = h;
   if (!vpPan) return;          // 短缓冲区/已滚回：保持顶部对齐，只冻结行数
-  // 直接贴住目标，不做缓动：键盘事件本身就是一次跳变，逐帧缓动反而会被看成
-  // “内容又滚了一下”，并让提交前后的位置对不上。
-  applyViewportTransform(h - vpFrozenH);
+  panTo(h - vpFrozenH);
+}
+
+// 与 IME 同长的 ease-out：位移不再一帧完成，也不会在提交瞬间再跳一格。
+function panTo(target) {
+  if (!vpFrozenH) return;
+  if (target === vpTo && vpAnim) return;      // 同一目标重复事件：让动画跑完
+  vpFrom = vpOffset;
+  vpTo = target;
+  vpAnimAt = performance.now();
+  if (!vpAnim) vpAnim = requestAnimationFrame(panStep);
+}
+
+function panStep() {
+  vpAnim = 0;
+  if (!vpFrozenH) return;
+  const t = Math.min(1, (performance.now() - vpAnimAt) / VP_ANIM_MS);
+  const eased = 1 - Math.pow(1 - t, 3);
+  vpOffset = vpFrom + (vpTo - vpFrom) * eased;
+  applyViewportTransform(vpOffset);
+  if (t < 1) { vpAnim = requestAnimationFrame(panStep); return; }
+  vpOffset = vpTo;
+  applyViewportTransform(vpOffset);
+  if (vpCommitPending) { vpCommitPending = false; commitViewport(); }
 }
 
 function applyViewportTransform(offset) {
-  termEl.style.transform = 'translate3d(0,' + offset + 'px,0)';
+  termEl.style.transform = 'translate3d(0,' + offset.toFixed(2) + 'px,0)';
 }
 
 function endViewportFreeze() {
   if (!vpFrozenH) return false;
+  if (vpAnim) { cancelAnimationFrame(vpAnim); vpAnim = 0; }
   clearTimeout(vpSettleTimer);
   vpSettleTimer = 0;
   vpFrozenH = 0;
@@ -619,6 +651,8 @@ function endViewportFreeze() {
   vpForceBottom = false;
   vpChanges = 0;
   vpFirstChangeAt = 0;
+  vpOffset = vpFrom = vpTo = 0;
+  vpCommitPending = false;
   termEl.style.height = '';
   termEl.style.transform = '';
   termEl.style.willChange = '';
@@ -627,6 +661,7 @@ function endViewportFreeze() {
 
 function commitViewport() {
   if (!vpFrozenH) return;
+  if (vpAnim) { vpCommitPending = true; return; }   // 位移动画还没走完：等它收尾
   const forced = vpForceBottom;
   const panned = vpPan;
   const changes = vpChanges;
