@@ -579,15 +579,16 @@ function syncViewport(smooth) {
     vpFrozenH = termHeight;
     const bottomIntent = bottomIntentWanted();
     vpForceBottom = bottomIntent;
-    // 全屏 TUI（alternate screen）绝不能平移：alt 缓冲没有回滚区，平移量无法在
-    // 提交后被 scrollToBottom 补偿，应用收到 SIGWINCH 又会整屏重绘回自己的视图，
-    // 结果就是“内容先上滑再被拉回”的滚动两下。只冻结行数，等应用重绘一次。
-    vpPan = !isAltBuffer() && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
+    const tui = isAltBuffer() || tuiPaints();
+    // alt 缓冲（less/vim）没有回滚区，平移量在提交后无法被 scrollToBottom 补偿；
+    // 内联 TUI（omp/htop…，普通缓冲但持续用光标定位重绘）平移后又会被自己画回去。
+    // 两者都只冻结行数、不平移：动画期间不位移，尺寸稳定后由应用重绘一次。
+    vpPan = !tui && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
     vpTarget = vpOffset = 0;
     termEl.style.height = vpFrozenH + 'px';
     if (vpPan) termEl.style.willChange = 'transform';
     logEvent('debug', 'client.vp.freeze',
-      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent);
+      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent + ' tui=' + tui);
   }
 
   if (h !== termHeight || !vpSettleTimer) {
@@ -1446,6 +1447,54 @@ function b64ToBytes(b64) {
   return out;
 }
 
+// TUI（omp / htop / 进度条等）会持续用光标定位、隐藏光标、同步输出重绘自己那一屏。
+// 这类应用在键盘动画里平移必然和它自己的重绘打架：先被平移滑上去、提交后它按新行数
+// 又画回自己的视图，观感就是“滚动两下”。所以它们的冻结只保行数、不平移。
+// 判定只看最近一段时间有没有出现这类序列，普通逐行输出（shell/日志/编译）不会命中。
+const TUI_QUIET_MS = 1500;
+let tuiPaintAt = 0;
+let tuiScanCarry = new Uint8Array(0);
+
+function noteTermBytes(bytes) {
+  // 跨帧的序列（ESC 在上一块末尾）用 12 字节回看窗口拼起来再扫。
+  const carry = tuiScanCarry.length;
+  let buf = bytes;
+  if (carry) {
+    buf = new Uint8Array(carry + bytes.length);
+    buf.set(tuiScanCarry, 0);
+    buf.set(bytes, carry);
+  }
+  const len = buf.length;
+  for (let i = 0; i + 1 < len; i++) {
+    if (buf[i] !== 0x1b || buf[i + 1] !== 0x5b) continue;          // ESC [
+    let j = i + 2;
+    const priv = buf[j] === 0x3f;                                  // '?' 私有模式（?25l / ?1049h / ?2026h）
+    if (priv) j++;
+    let digits = 0;
+    let ok = false;
+    for (; j < len; j++) {
+      const c = buf[j];
+      if (c >= 0x30 && c <= 0x39) { if (++digits > 4) break; continue; }
+      if (c === 0x3b && digits) { digits = 0; continue; }           // ';'
+      ok = c === 0x48 || c === 0x66 || c === 0x6c || (priv && c === 0x68); // H/f/l/?h
+      break;
+    }
+    if (ok) { tuiPaintAt = performance.now(); break; }
+  }
+  tuiScanCarry = buf.slice(len > 12 ? len - 12 : 0);
+}
+
+function tuiPaints() {
+  return tuiPaintAt > 0 && performance.now() - tuiPaintAt <= TUI_QUIET_MS;
+}
+
+function writeOutput(b64) {
+  const bytes = b64ToBytes(b64);
+  noteTermBytes(bytes);
+  term.write(bytes, () => updateScrollPill());
+}
+
+
 function handleMsg(buf) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(buf)); } catch { return; }
@@ -1504,7 +1553,7 @@ function handleMsg(buf) {
         SESSION_SEQ.set(msg.id, msg.seq);
       }
       if (!atBottom()) unseenOutput = true;
-      term.write(b64ToBytes(msg.data), () => updateScrollPill());
+      writeOutput(msg.data);
       break;
     }
     case 'exit':
@@ -1540,7 +1589,7 @@ function handleMsg(buf) {
       if (!attachedFirst) {
         // 旧服务端在 attached 之前发了 output；按到达顺序补写。
         for (const m of early) {
-          if (term && m.data) term.write(b64ToBytes(m.data), () => updateScrollPill());
+          if (term && m.data) writeOutput(m.data);
           if (typeof m.seq === 'number') SESSION_SEQ.set(msg.id, m.seq);
         }
       }
