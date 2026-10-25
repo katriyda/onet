@@ -28,6 +28,8 @@
 - `modState` 键名小写；`dataset.key` 映射前先 `toLowerCase()`（历史 bug）
 - 布局跟 `visualViewport`，键盘弹起时重排并 resize；固定层（抽屉/底部菜单）用 `--vv-top`/`--vvh`，否则会被软键盘盖住
 - **移动端视口高度变化必须走冻结/提交路径**（`syncViewport`/`commitViewport`）：键盘动画期间 `#term` 用内联高度冻结行数、`translate3d` 让底边贴住可视区；高度稳定 `VP_SETTLE_MS` 后才 `fit + resize`。别改回每帧 `fit.fit()`——那会逐行 reflow 并把中间 cols/rows 发给 ConPTY，观感是“卡一下跳一行”；`fitTerm`/`sendResize` 在冻结期间的早退是故意的
+- **底部意图要在浏览器动手之前记**：浏览器在 focus/键盘弹起阶段会先把 xterm viewport 推上去 1–2 行，等到提交时再判 `atBottom` 就会把“本来在底部”误判成“用户滚上去了”。`onTouchStart`/textarea focus 记 `bottomIntentAt`，`commitViewport` 用它决定 `vpForceBottom`；延后锚定 `settleAnchorBottom`（1+2 帧 + 60/140/300ms，靠 `anchorSeq` 作废）不能删——fit 后 viewport/scroll-area 是延后同步的，同帧 `scrollToBottom` 会差 1–2 行。用户一拖动（`onTouchMove`/`startMomentum`）就作废，别改成无条件拉回
+- **`#app` 是固定壳**：`position:fixed` + JS 同时写 `top`（`vv.offsetTop`，coarse pointer 才跟）和 `height`（`vv.height`），`--vv-top` 用同一个 clamp 后的值；页面自身必须 `scrollY === 0`（`resetPageScroll` 兜底）。别改回只跟 `vv.height`——visual viewport 被平移时整个 app 会落到可见区外。chrome（`#header`/`#select-bar`/`#scroll-pill`/`#placeholder`）用 `touch-action` 隔离，抽屉/菜单/日志体保留 `pan-y`
 - 桌面模式（鼠标窗口拖拽）不走冻结路径，保持逐帧 fit；判断依据是 `(pointer: coarse)`（触屏），别改成按布局模式或删掉——窄窗口 + 鼠标会因此丢掉实时重排
 - `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS
 - 会话恢复顺序：URL `?s=` > `localStorage.onet_last_session` > `sessionStorage` 兜底。只在 `attached` 后写记录；Android WebView 刷新经常回退到 `/`（丢掉 `?s=`）且 `sessionStorage` 不跨实例，改用 localStorage 才能留在原会话，别改回只用 sessionStorage

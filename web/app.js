@@ -482,6 +482,7 @@ window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 const VP_SETTLE_MS = 140;
 const VP_EASE = 0.5;           // 大跳变时每帧逼近目标的比例（~4 帧收敛）
 const VP_FOLLOW_PX = 48;       // 单次变化小于此值：直接贴住键盘边（不产生滞后）
+const BOTTOM_INTENT_MS = 2000; // 触摸开始时在底部 → 这段时间内的视口变化仍锚底
 const coarsePointer = matchMedia('(pointer: coarse)');
 
 let layoutRaf = 0;
@@ -493,6 +494,10 @@ let vpTarget = 0;              // 目标位移（让底边贴住 term-wrap 底�
 let vpOffset = 0;              // 当前位移
 let vpRaf = 0;
 let vpSettleTimer = 0;
+let bottomIntentAt = 0;        // 用户最近一次在底部点击/聚焦的时间，0 = 无意图
+let vpForceBottom = false;     // 本次冻结是否来自“底部意图”
+let anchorSeq = 0;             // 取消延后锚定的令牌
+let lastScrollResetLogAt = 0;
 
 function scheduleLayout(smooth = false) {
   if (smooth) layoutSmooth = true;
@@ -506,12 +511,20 @@ function scheduleLayout(smooth = false) {
 }
 
 function layout(smooth = false) {
+  // 先清掉页面自身的滚动：否则 vv.offsetTop 会把页面 scroll 也算进来，
+  // app 会被双重偏移，用户只能靠手滚找回终端。
+  resetPageScroll();
   const vv = window.visualViewport;
   if (vv) {
+    const top = coarsePointer.matches
+      ? clamp(vv.offsetTop, 0, Math.max(0, window.innerHeight - vv.height))
+      : 0;
+    app.style.top = top + 'px';
     app.style.height = vv.height + 'px';
-    document.documentElement.style.setProperty('--vv-top', vv.offsetTop + 'px');
+    document.documentElement.style.setProperty('--vv-top', top + 'px');
     document.documentElement.style.setProperty('--vvh', vv.height + 'px');
   } else {
+    app.style.top = '';
     app.style.height = '';
     document.documentElement.style.removeProperty('--vv-top');
     document.documentElement.style.removeProperty('--vvh');
@@ -519,6 +532,17 @@ function layout(smooth = false) {
   syncViewport(smooth);
   updateScrollPill();
 }
+
+function resetPageScroll() {
+  const y = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  if (!y) return;
+  if (performance.now() - lastScrollResetLogAt > 1000) {
+    lastScrollResetLogAt = performance.now();
+    logEvent('info', 'client.vp.scrollreset', 'sy=' + Math.round(y));
+  }
+  window.scrollTo(0, 0);
+}
+window.addEventListener('scroll', resetPageScroll, { passive: true });
 
 function viewportHeight() {
   // 冻结期间 #term 的高度是内联固定的，必须看父容器（#term-wrap）的可用高度。
@@ -537,8 +561,7 @@ function canAnchorBottom() {
   try {
     const b = term.buffer.active;
     if (b.viewportY < b.baseY) return false;
-    if (isAltBuffer()) return true;
-    return b.baseY > 0 || b.cursorY >= term.rows - 1;
+    return bufferFillsScreen();
   } catch { return false; }
 }
 
@@ -554,11 +577,14 @@ function syncViewport(smooth) {
       return;
     }
     vpFrozenH = termHeight;
-    vpPan = canAnchorBottom();
+    const bottomIntent = bottomIntentWanted();
+    vpForceBottom = bottomIntent;
+    vpPan = canAnchorBottom() || (bottomIntent && bufferFillsScreen());
     vpTarget = vpOffset = 0;
     termEl.style.height = vpFrozenH + 'px';
     if (vpPan) termEl.style.willChange = 'transform';
-    logEvent('debug', 'client.vp.freeze', 'h=' + vpFrozenH + ' pan=' + vpPan);
+    logEvent('debug', 'client.vp.freeze',
+      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent);
   }
 
   if (h !== termHeight || !vpSettleTimer) {
@@ -613,6 +639,7 @@ function endViewportFreeze() {
   vpSettleTimer = 0;
   vpFrozenH = 0;
   vpPan = false;
+  vpForceBottom = false;
   vpTarget = vpOffset = 0;
   termEl.style.height = '';
   termEl.style.transform = '';
@@ -622,15 +649,28 @@ function endViewportFreeze() {
 
 function commitViewport() {
   if (!vpFrozenH) return;
-  const atEnd = bufferAtBottom();
+  const forced = vpForceBottom;
   const panned = vpPan;
+  const atEnd = forced || bufferAtBottom();
   endViewportFreeze();
   lastFitKey = '';
   fitTerm(true);               // 触发 term.onResize → 延迟 80ms 发一次 resize
   termHeight = viewportHeight();
-  logEvent('debug', 'client.vp.commit', 'h=' + termHeight + ' atBottom=' + atEnd + ' pan=' + panned);
-  if (atEnd) scrollToBottom();
+  const vv = window.visualViewport;
+  logEvent('info', 'client.vp.settle',
+    'vvh=' + Math.round(vv ? vv.height : window.innerHeight) +
+    ' top=' + Math.round(parseFloat(app.style.top) || 0) +
+    ' ih=' + Math.round(window.innerHeight) +
+    ' sy=' + Math.round(window.scrollY || 0) +
+    ' rows=' + term.rows +
+    ' bottom=' + (atEnd ? 1 : 0) +
+    ' force=' + (forced ? 1 : 0) +
+    ' pan=' + (panned ? 1 : 0));
+  // fit 之后 viewport/scroll-area 的同步是延后的，同一帧 scrollToBottom 会落在旧
+  // scrollHeight 上（差 1–2 行）。统一走延后重试，尺寸稳定后只回到底部一次。
+  if (atEnd) settleAnchorBottom();
   else updateScrollPill();
+  clearBottomIntent();
 }
 
 function fitTerm(force = false) {
@@ -788,6 +828,14 @@ function initTerm() {
   term.loadAddon(fit);
   term.open(termEl);
 
+  // 非触摸的聚焦路径（外接键盘/程序 focus）也记底部意图；只在确实在底部时刷新，
+  // 不能用 false 覆盖 touchstart 刚记下的意图。
+  if (term.textarea) {
+    term.textarea.addEventListener('focus', () => {
+      if (atBottom()) bottomIntentAt = performance.now();
+    });
+  }
+
   xtermViewport = term.element.querySelector('.xterm-viewport');
   if (xtermViewport) {
     xtermViewport.addEventListener('scroll', () => {
@@ -870,6 +918,23 @@ function atBottom() {
   return v.scrollTop + v.clientHeight >= v.scrollHeight - 2;
 }
 
+// “底部意图”：浏览器在 focus/键盘弹起阶段可能先把 xterm viewport 推上去 1–2 行，
+// 等到 commit 时再判断 atBottom 就会把“本来在底部”误判成“用户滚上去了”。
+// 所以在触摸/聚焦那一刻（浏览器还没动手之前）记下来，短时间内的视口变化都锚底。
+function noteBottomIntent() {
+  if (!term || !current) return;
+  bottomIntentAt = atBottom() ? performance.now() : 0;
+}
+function clearBottomIntent() { bottomIntentAt = 0; }
+function bottomIntentWanted() {
+  return bottomIntentAt > 0 && performance.now() - bottomIntentAt <= BOTTOM_INTENT_MS;
+}
+function bufferFillsScreen() {
+  try {
+    return isAltBuffer() || term.buffer.active.baseY > 0 || term.buffer.active.cursorY >= term.rows - 1;
+  } catch { return false; }
+}
+
 function isAltBuffer() {
   try { return term.buffer.active.type === 'alternate'; } catch { return false; }
 }
@@ -880,6 +945,13 @@ function hasMouseTracking() {
 
 function updateScrollPill() {
   if (!scrollPill) return;
+  // 键盘动画期间不弹“回到底部”：此时“不在底部”多半来自浏览器的中间滚动，
+  // 提交后的延后锚定会重新判断，提前提示只会误导用户去手滚。
+  if (vpFrozenH && vpForceBottom) {
+    unseenOutput = false;
+    scrollPill.hidden = true;
+    return;
+  }
   const show = !!(term && !isAltBuffer() && !atBottom());
   if (!show) {
     unseenOutput = false;
@@ -893,10 +965,40 @@ function updateScrollPill() {
 
 function scrollToBottom() {
   if (!term) return;
+  anchorSeq++;                 // 用户明确要底部：作废未完成的延后锚定链
   cancelMomentum();
   term.scrollToBottom();
   unseenOutput = false;
   updateScrollPill();
+}
+
+// 尺寸稳定后的底部锚定：xterm 5.x 的 viewport/scroll-area 同步是延后的
+// （见 initTerm 的 attach 路径），fit 完同一帧 scrollToBottom 会落在旧
+// scrollHeight 上。1+2 帧 + 60/140/300ms 重试，用户一滚动就由 anchorSeq 作废。
+function settleAnchorBottom() {
+  if (!term || !current) return;
+  cancelMomentum();
+  const token = ++anchorSeq;
+  const apply = (log) => {
+    if (token !== anchorSeq || !term) return;
+    term.scrollToBottom();
+    unseenOutput = false;
+    updateScrollPill();
+    if (log) {
+      const v = viewportEl();
+      if (v) {
+        logEvent('info', 'client.vp.anchor',
+          'sc=' + Math.round(v.scrollTop) + ' ch=' + Math.round(v.clientHeight) +
+          ' sh=' + Math.round(v.scrollHeight) + ' bottom=' + (atBottom() ? 1 : 0) +
+          ' rows=' + term.rows);
+      }
+    }
+  };
+  apply(false);
+  requestAnimationFrame(() => { apply(false); requestAnimationFrame(() => apply(false)); });
+  setTimeout(() => apply(false), 60);
+  setTimeout(() => apply(false), 140);
+  setTimeout(() => apply(true), 300);
 }
 
 function screenRowHeight() {
@@ -1011,6 +1113,9 @@ function onTouchStart(e) {
   }
   if (e.touches.length !== 1) return;
 
+  // 在浏览器 focus/键盘滚动之前记住“点之前是否在底部”。
+  noteBottomIntent();
+
   const t = e.touches[0];
   const vp = viewportEl();
   gesture = {
@@ -1072,6 +1177,10 @@ function onTouchMove(e) {
   if (!gesture.moved && Math.hypot(dx, dy) > TAP_SLOP) {
     gesture.moved = true;
     cancelLongPress();
+    // 手指确实开始拖动：放弃强制底部，并作废未完成的延后锚定。
+    clearBottomIntent();
+    vpForceBottom = false;
+    anchorSeq++;
   }
 
   // 左缘右滑 → 打开会话抽屉
@@ -1184,6 +1293,8 @@ function cancelMomentum() {
 
 function startMomentum(velocity) {
   cancelMomentum();
+  anchorSeq++;
+  clearBottomIntent();
   let last = performance.now();
   const step = (now) => {
     const dt = Math.min(now - last, 40);
@@ -1439,8 +1550,8 @@ function handleMsg(buf) {
       scheduleResize();
       setTimeout(() => {
         if (current && current.id === msg.id) {
-          if (wasAtBottom) scrollToBottom();
-          updateScrollPill();
+          if (wasAtBottom) settleAnchorBottom();
+          else updateScrollPill();
         }
       }, 40);
       break;

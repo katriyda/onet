@@ -74,11 +74,21 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 /* ---------------- 布局骨架 ---------------- */
 #app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
   display: flex;
   flex-direction: column;
   height: 100dvh;
   min-height: 0;
 }
+
+/* 软键盘/浏览器平移 visual viewport 时，从这些不可滚动的 chrome 上起手不能把
+   页面或可视区拖走（对齐由 JS 写 top/height，见 layout()）。 */
+body.mode-mobile #header, #select-bar, #scroll-pill, #scrim, #placeholder { touch-action: none; }
+#keys, #d-tabs { touch-action: pan-x; }
+#drawer-list, #menu, #log-body, #settings-body { touch-action: pan-y; }
 
 #header {
   flex: none;
