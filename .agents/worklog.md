@@ -62,3 +62,20 @@
 - 产出: session.go、server.go、config.go、main.go、handoff.go、handoff_unix.go、handoff_windows.go、update_web.go、session_replay_test.go、web/app.js、web/index.html、web/style.css、README.md、AGENTS.md、config.example.json；部署 config.json 已加 `allow_insecure:true` 并关闭 `log_terminal_io`
 - 结果: 完成。`go test -count=1 ./...`、`go vet ./...`、`go build` 通过；Node WS 实测 5000 行断线重连 `resumed=true`、首帧 lastSeq+1、无重无缺；>320KB 后重连 `truncated=true` + notice；慢客户端 16s 触发 `ws.slow_client`、无 send_drop、重连可续传；本地 release 服务驱动 Windows 热更新成功（200/409 并发保护、0.2.0、resumed、PID/回放/滚动保留、`app.handoff_done`）；Chromium 验证 boot 重试/失败重试页、粘贴面板插入、菜单/抽屉/日志焦点与 Tab、删除确认文案、退出 code 0 文案、toast error 优先。限制：慢客户端 1013 帧因对端不读无法观察，按日志+强制断开验证；CDP offline 未真正断开 WS，心跳超时未端到端复验；handoff 失败回滚路径未构造触发器
 - meta: commit=e03abd4 tag=v0.3.0 files=session.go,server.go,config.go,main.go,handoff.go,handoff_unix.go,handoff_windows.go,update_web.go,session_replay_test.go,web/app.js,web/index.html,web/style.css,README.md,AGENTS.md,config.example.json
+
+## 2026-10-25 14:17 — 刷新后保持当前会话（localStorage 恢复）
+- session: s-20261025-refresh
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 网页刷新后仍停留在当前查看的会话，不再跳到最近创建的「最后一个会话」
+- 做了什么:
+  - 从线上日志定位根因：用户的 Android WebView（UA 含 `; wv`）多次 `client.boot href=/`，刷新会丢掉 URL `?s=`；旧实现只写 `sessionStorage`，WebView 重启/新实例后无记录，`pickTarget()` 回退到 `createdAt` 最大的会话
+  - `web/app.js` 新增 `readStoredSession()`/`writeStoredSession()`：会话记录主存 `localStorage`（跨刷新、新标签页、WebView 重启），`sessionStorage` 仅隐私模式兜底；URL `?s=` 仍为最高优先级
+  - `rememberSession()` 在 `attached` 后同时写 localStorage + sessionStorage + URL；空会话列表时两处一起清；`pickTarget()` 统一走 `readStoredSession()`
+  - `web/index.html` 资源版本 `app.js?v=18` → `v=19`；README 与 AGENTS 更新会话恢复顺序与 WebView 坑
+  - 隔离服务（127.0.0.1:7699，desktop/mobile 配置）Chromium 验证：新建 sess-1/sess-2 后切回 sess-1，清空 sessionStorage 并整页导航到 `/` 仍恢复 sess-1；新标签页打开 `/` 恢复 sess-1；`?s=sess-2` 深链覆盖存储并回写；存储指向不存在会话时回退最近会话并 toast
+  - `go vet ./...`、`go build`、`go test ./...` 通过；CI 绿；tag v0.3.1 发布 8 平台资产
+  - 通过 `POST /update` 将部署实例 `C:\Users\katri\A\onet-windows-amd64` 从 0.3.0 热更新到 0.3.1：`handoff.restored sessions=2`，`/config` 返回 `version=0.3.1`，`app.js?v=19` 已生效
+- 产出: web/app.js、web/index.html、README.md、AGENTS.md；提交 a4863fe；tag v0.3.1（Release 8 资产）；线上实例已更新
+- 结果: 完成。旧 WebView 页面需刷新一次加载 v19（首刷可能仍读旧 sessionStorage/URL，attach 后即写入 localStorage，此后刷新稳定留在当前会话）
+- meta: commit=a4863fe tag=v0.3.1 files=web/app.js,web/index.html,README.md,AGENTS.md,.agents/worklog.md
