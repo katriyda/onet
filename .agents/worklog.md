@@ -228,5 +228,24 @@
 - meta: commit=9934eb9 tag=v0.5.6 files=web/app.js,web/index.html,AGENTS.md
 
 
+## 2026-10-25 18:00 — 键盘动画期间的位移改成“跟着键盘滑”，收起方向不冻结
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户反馈“不是抽动，是内容会滚动一下”；真机日志确认 `n=1`（只上报最终高度），平移一帧完成就会看成“滚一下”
+- 做了什么:
+  - 真机取证：7681 日志 `client.vp.settle ... n=1 dt=60`（偶尔 `n=3 dt=98`）→ 手机基本拿不到键盘逐帧高度，只能自己补动画
+  - `web/app.js` 平移改回 rAF 缓动：新增 `VP_ANIM_MS=190` + ease-out（`panTo`/`panStep`），提交撞上动画时挂 `vpCommitPending`，等动画收尾再提交（避免移除 transform 时再跳一格）；`VP_SETTLE_MS` 保持 60，`scheduleResize` 40
+  - 收起方向（可视区变大）不冻结：冻结网格比窗口矮，平移会在顶部露空白；改为直接 `fit + scrollToBottom + settleAnchorBottom`，多出来的行从回滚区补上
+  - `app.js?v=33`（v0.5.7，缓动）、`app.js?v=34`（v0.5.8，收起方向）
+- 产出: web/app.js、web/index.html；提交 161a28a、e193a53；tag/Release v0.5.7、v0.5.8
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离模拟器 + 现场 omp 实测（绝对屏幕 y 采样）：
+  - 弹起（710→420）：transform 逐帧 `-20 → -102 → -138 → -181 → -214 → -241 → -260 → -273 → -282 → -287 → -289 → -290`（约 190ms），提交后可视文本完全不变（`L125/L136`），再无跳变
+  - 收起（420→710）：v0.5.7 缓动 + 顶部空白；v0.5.8 改成 16ms 内直接重排到 33 行（无空白、无冻结）
+  - 发布：两版 CI/Release 均绿（9 资产），`/healthz` 0.5.8，页面引用 `app.js?v=34`
+  - 未决：位移本身（~290px）在“输入行必须可见”的前提下无法消除；已向用户确认取舍（跟随滑动 vs 完全不 resize）
+- meta: commit=e193a53 tag=v0.5.8 files=web/app.js,web/index.html
+
+
 
 
