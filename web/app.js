@@ -487,13 +487,13 @@ window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 // 每跨过一个字符高度就 reflow 一次，还会把中间尺寸发给 PTY（ConPTY 重排 +
 // shell 重绘），视觉上就是“卡一下、跳一行”。
 // 现在：高度变化期间冻结 xterm 尺寸，并把 #term 的位移补成一段与 IME 大致同长的
-// ease-out（见 VP_ANIM_MS），让底边“跟着键盘”滑到新位置；
-// 尺寸稳定 VP_SETTLE_MS 后再一次性 fit + resize。行数没变 → 不动画。
-// 提交要早：键盘动画本身通常 200–300ms，提交（本地重排 + 40ms 后的 PTY resize +
-// 应用重绘）必须落在这段动画里，否则应用那次重绘会在键盘停稳之后单独“再动一下”。
-// 手机一般只上报一次最终高度（`n=1`），拿不到键盘的逐帧位置，所以平移自己补一段
-// 与 IME 大致同长的 ease-out 动画：不然 290px 的位移在同一帧完成，看着就是“内容
-// 滚了一下”。提交必须等这段动画走完，否则移除 transform 的瞬间会再跳一格。
+// ease-out（见 VP_ANIM_MS），让底边“跟着键盘”滑到新位置。
+// 普通滚动缓冲区（omp 聊天/普通输出）键盘期间**连 PTY 行数都不改**：只平移，等
+// 键盘收起再解除冻结（client.vp.hold）。原因：任何 resize 都会让应用收到 SIGWINCH
+// 并清屏重排（omp 会把整个会话重印一遍），平移再准也会看到“第二次跳动”。行数不变、
+// 不重排，屏幕内容就是同一屏被键盘顶上来一截，收起时滑回去。
+// 全屏 TUI（alternate screen，无回滚区）保持原逻辑：冻结行数、不平移，尺寸稳定
+// VP_SETTLE_MS 后一次性 fit + resize（应用本来就要按可见区重画）。
 const VP_SETTLE_MS = 60;
 const VP_ANIM_MS = 190;
 const BOTTOM_INTENT_MS = 2000; // 触摸开始时在底部 → 这段时间内的视口变化仍锚底
@@ -504,6 +504,8 @@ let layoutSmooth = false;
 let termHeight = 0;            // 最近一次布局后 #term 的高度
 let vpFrozenH = 0;             // 冻结期间 #term 的像素高度（0 = 未冻结）
 let vpPan = false;             // 是否把底边钉在可视区底部（缓冲区未填满时不钉）
+let vpHold = false;            // 普通缓冲区：键盘期间不 resize PTY，只平移
+let vpFrozenW = 0;             // 冻结期间 #term 的宽度（宽度变了必须重排，如旋转）
 let vpSettleTimer = 0;
 let vpChanges = 0;             // 本次冻结内高度变了多少次（诊断：真机是否逐帧上报）
 let vpFirstChangeAt = 0;       // 本次冻结第一次高度变化的时刻
@@ -588,10 +590,26 @@ function syncViewport(smooth) {
   const h = viewportHeight();
   if (!term || !fit) { termHeight = h; return; }
 
-  // 可视区变大 = 键盘收起。冻结的网格比窗口矮，平移会在顶部/底部露出一块空白，
-  // 所以这个方向不冻结：直接 fit，多出来的行从回滚区补上，底边继续跟着键盘。
+  // 宽度变了（旋转/分屏）：行数必须跟着重排，不能继续 hold。
+  if (vpFrozenH && termEl.clientWidth !== vpFrozenW) {
+    endViewportFreeze();
+    termHeight = h;
+    fitTerm();
+    return;
+  }
+
+  // 可视区变大 = 键盘收起。
   const growing = h > termHeight;
-  if (vpFrozenH && growing) { commitViewport(); return; }  // 冻结中途键盘又收起：先按当前尺寸收尾
+  if (vpFrozenH && growing) {
+    if (!vpHold) { commitViewport(); return; }   // alt：按当前尺寸收尾（必须重排）
+    if (!vpPan) {
+      // 短缓冲区/已滚回：没有平移要收尾，等高度回到冻结值再解除冻结（内容不动）。
+      termHeight = h;
+      if (h >= vpFrozenH - 1) { endViewportFreeze(); fitTerm(); }
+      return;
+    }
+    // hold + 平移：交给下面的 panTo 滑回 0，动画结束时由 panStep 解除冻结。
+  }
 
   if (!vpFrozenH) {
     // 只有触屏设备（软键盘）走平滑路径；鼠标拖拽窗口保持逐帧 fit。
@@ -609,18 +627,22 @@ function syncViewport(smooth) {
       return;
     }
     vpFrozenH = termHeight;
+    vpFrozenW = termEl.clientWidth;
     vpChanges = 0;
     vpFirstChangeAt = 0;
     const bottomIntent = bottomIntentWanted();
     vpForceBottom = bottomIntent;
-    // alt 缓冲（less/vim）没有回滚区（scrollHeight == clientHeight），平移量提交后
+    // 全屏 TUI（less/vim）没有回滚区（scrollHeight == clientHeight），平移量提交后
     // 无法被 scrollToBottom 补偿，应用收到 SIGWINCH 又会整屏重绘回自己的视图，
     // 平移只会变成“滑上去再被拉回”。这类缓冲只冻结行数、不平移。
     vpPan = !isAltBuffer() && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
+    // 普通缓冲区：连 PTY 行数都不改（只平移），否则应用收到 SIGWINCH 会清屏重排，
+    // omp 会把整个会话重印一遍，平移做得再准也会看到第二次跳动。
+    vpHold = !isAltBuffer();
     termEl.style.height = vpFrozenH + 'px';
     if (vpPan) termEl.style.willChange = 'transform';
     logEvent('debug', 'client.vp.freeze',
-      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent);
+      'h=' + vpFrozenH + ' pan=' + vpPan + ' hold=' + vpHold + ' intent=' + bottomIntent);
   }
 
   if (h !== termHeight) {
@@ -656,6 +678,14 @@ function panStep() {
   if (t < 1) { vpAnim = requestAnimationFrame(panStep); return; }
   vpOffset = vpTo;
   applyViewportTransform(vpOffset);
+  if (vpHold && vpTo === 0 && viewportHeight() >= vpFrozenH - 1) {
+    // 键盘收起到位：位移已是 0、高度也回到冻结值，此时解除冻结不产生视觉变化。
+    // 行数从没改过，所以也不需要 fit（fitTerm 会因尺寸相同直接跳过）。
+    endViewportFreeze();
+    termHeight = viewportHeight();
+    fitTerm();
+    return;
+  }
   if (vpCommitPending) { vpCommitPending = false; commitViewport(); }
 }
 
@@ -669,7 +699,9 @@ function endViewportFreeze() {
   clearTimeout(vpSettleTimer);
   vpSettleTimer = 0;
   vpFrozenH = 0;
+  vpFrozenW = 0;
   vpPan = false;
+  vpHold = false;
   vpForceBottom = false;
   vpChanges = 0;
   vpFirstChangeAt = 0;
@@ -684,10 +716,28 @@ function endViewportFreeze() {
 function commitViewport() {
   if (!vpFrozenH) return;
   if (vpAnim) { vpCommitPending = true; return; }   // 位移动画还没走完：等它收尾
-  const forced = vpForceBottom;
-  const panned = vpPan;
   const changes = vpChanges;
   const settleDt = vpFirstChangeAt ? Math.round(performance.now() - vpFirstChangeAt) : 0;
+  if (vpHold) {
+    // 键盘停在原地：不 fit、不发 resize，应用永远不会收到 SIGWINCH → 不重绘。
+    // 平移已是稳态：用户看到的就是同一屏内容被键盘顶上来一截。
+    const vv = window.visualViewport;
+    logEvent('info', 'client.vp.hold',
+      'vvh=' + Math.round(vv ? vv.height : window.innerHeight) +
+      ' rows=' + term.rows +
+      ' pan=' + (vpPan ? 1 : 0) +
+      ' off=' + Math.round(vpOffset) +
+      ' n=' + changes +
+      ' dt=' + settleDt +
+      ' v=' + APP_BUILD);
+    vpSettleTimer = 0;
+    vpForceBottom = false;   // 底部意图已兑现；滚动胶囊回到按 atBottom 判断
+    updateScrollPill();
+    clearBottomIntent();
+    return;
+  }
+  const forced = vpForceBottom;
+  const panned = vpPan;
   const atEnd = forced || bufferAtBottom();
   endViewportFreeze();
   lastFitKey = '';
