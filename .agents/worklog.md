@@ -123,7 +123,8 @@
   - 逐帧小步长（≤48px）直接贴住、无跟随滞后；视口一次性大跳变用 rAF 缓动（`VP_EASE=0.5`）；用 `(pointer: coarse)` 判定触屏，鼠标拖拽窗口保持逐帧 fit
   - 短缓冲区（`baseY=0` 且光标不在末行）或已滚回历史时不平移、只冻结行数，避免把顶部提示符推出屏幕；用 `buffer.viewportY/baseY` 判断底部，规避容器缩小后像素级 `atBottom()` 误判
   - 键盘关闭同样锚底，提交后按底部状态 `scrollToBottom`；字号变化前先结束冻结；同步 app.js?v=27 与 README/AGENTS/docs 站点说明
-- 产出: web/app.js、web/index.html、AGENTS.md、README.md、docs/site/index.html；提交 d595435
-- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 移动视口逐帧模拟（390×700→500，20px/帧）：冻结 70 帧内 xterm 高度恒定、屏幕仅重排 1 次、光标位移与可视区底边位移一致（-180/-180），PTY 每方向只收到 1 条 resize（31↔19）；短缓冲区光标零位移、无重排；细指针路径无冻结、逐帧重排；已推送 main（CI/Pages 运行中）。运行中的 A 实例（7681）仍是 v0.5.0，需更新二进制或走 `/update` 后才生效；真机 IME/键盘动画需用户复验
-- meta: commit=d595435 files=web/app.js,web/index.html,AGENTS.md,README.md,docs/site/index.html
+  - 发布 `v0.5.1`（轻量 tag）：Release workflow 产出 8 平台资产 + `checksums.txt`，Windows zip 校验一致且内嵌 `app.js?v=27`；通过 `POST /update` 将 A 部署实例 0.5.0→0.5.1，`handoff.restored sessions=1`
+- 产出: web/app.js、web/index.html、AGENTS.md、README.md、docs/site/index.html；提交 d595435；tag/Release v0.5.1
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 移动视口逐帧模拟（390×700→500，20px/帧）：冻结 70 帧内 xterm 高度恒定、屏幕仅重排 1 次、光标位移与可视区底边位移一致（-180/-180），PTY 每方向只收到 1 条 resize（31↔19）；短缓冲区光标零位移、无重排；细指针路径无冻结、逐帧重排；main 已推送（CI/Pages 绿）。发布 v0.5.1 后 `POST /update` 返回 `updated=true`，1s 内 `/healthz` 为 `version=0.5.1,resumed=true`，日志 `handoff.restored sessions=1`，部署页 `index.html` 已引用 `app.js?v=27`（已打开的旧页面需刷新才会加载新 JS）；真机 IME/键盘动画需用户复验
+- meta: commit=d595435 tag=v0.5.1 files=web/app.js,web/index.html,AGENTS.md,README.md,docs/site/index.html
 
