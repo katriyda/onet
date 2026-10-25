@@ -128,3 +128,19 @@
 - 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 移动视口逐帧模拟（390×700→500，20px/帧）：冻结 70 帧内 xterm 高度恒定、屏幕仅重排 1 次、光标位移与可视区底边位移一致（-180/-180），PTY 每方向只收到 1 条 resize（31↔19）；短缓冲区光标零位移、无重排；细指针路径无冻结、逐帧重排；main 已推送（CI/Pages 绿）。发布 v0.5.1 后 `POST /update` 返回 `updated=true`，1s 内 `/healthz` 为 `version=0.5.1,resumed=true`，日志 `handoff.restored sessions=1`，部署页 `index.html` 已引用 `app.js?v=27`（已打开的旧页面需刷新才会加载新 JS）；真机 IME/键盘动画需用户复验
 - meta: commit=d595435 tag=v0.5.1 files=web/app.js,web/index.html,AGENTS.md,README.md,docs/site/index.html
 
+
+## 2026-10-25 16:16 — 移动端软键盘：可视区对齐 + 底部重新锚定
+- session: s-20261025-kbanchor
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 键盘弹起后终端仍能停在底部（不再需要手动滚两下）；页面/可视区不被键盘推走；用户主动上滑查看历史时不被强制拉回
+- 做了什么:
+  - `web/app.js` 新增底部意图 latch（`bottomIntentAt`/`vpForceBottom`）：`onTouchStart` 与 textarea focus 在浏览器 focus 滚动**之前**记录“点之前是否在底部”，冻结决策 `vpPan = canAnchorBottom() || (intent && bufferFillsScreen())`；`onTouchMove`/`startMomentum` 一旦拖动就清除意图并用 `anchorSeq` 作废未完成的锚定
+  - 新增 `settleAnchorBottom()`：fit 后 1+2 帧 + 60/140ms/300ms 幂等重试 `term.scrollToBottom()`，替代同一帧滚动（xterm 5.x viewport/scroll-area 延后同步，同帧会差 1–2 行）；`commitViewport()` 先保存 `forced` 再解冻，日志升级为 INFO `client.vp.settle`（vvh/top/ih/sy/rows/bottom/force/pan）与 `client.vp.anchor`；attach 回放后的底部锚定复用同一路径
+  - `#app` 改为固定壳：JS 同时写 `top`（`vv.offsetTop`，clamp，仅 coarse pointer）与 `height`（`vv.height`），`--vv-top` 用同一值；新增 `resetPageScroll()` + passive scroll 兜底；chrome 用 `touch-action` 隔离（header 限 mobile、`#keys`/`#d-tabs` pan-x、抽屉/菜单/日志/设置 pan-y）
+  - 键盘冻结期间底部意图存在时抑制“回到底部”浮标，避免误导；`scrollToBottom()`（用户动作）递增 `anchorSeq` 取消延后链
+  - 同步 `app.js?v=28` / `style.css?v=12`，README 移动端条目与 AGENTS 前端坑新增两条不变量
+  - 发布 `v0.5.2`：Release 产出 8 平台资产 + `checksums.txt`；`POST /update` 将 A 部署实例 0.5.1→0.5.2（`handoff.restored sessions=1`）
+- 产出: web/app.js、web/style.css、web/index.html、AGENTS.md、README.md；提交 6e830aa；tag/Release v0.5.2
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 390×700（init script 强制 coarse pointer）逐项验证：app `position:fixed`/`top=0px`/`sy=0`/高度=vvh；短缓冲区冻结不平移、重排 1 次、光标 top 不变；满缓冲区冻结 transform 逐帧 -20…-200 且光标与可视区底边间距恒定 4px，提交后 screenH 544→340 仅变 1 次、atBottom；底部意图回归（合成 tap 后把 scrollTop 抬 40px）→ 冻结 `intent=true pan=true`、提交 `bottom=1 force=1 pan=1` 且锚回底部、浮标隐藏；上滑 120px 后 tap 再缩键盘保持 `atBottom=false` 且浮标可见；细指针页不冻结、逐帧重排；桌面 1280×800 布局与输入正常。日志确认 `client.vp.settle ... bottom=1 force=1 sy=0`、`client.vp.anchor bottom=1`。A 实例 `/healthz` 为 `version=0.5.2,resumed=true`，部署页引用 `app.js?v=28`。真机需强制刷新一次复验键盘行为（Android 日志 `vvh/ih` 若在键盘弹起时不变 = 宿主 `adjustPan`，web 层无解）
+- meta: commit=6e830aa tag=v0.5.2 files=web/app.js,web/style.css,web/index.html,AGENTS.md,README.md
