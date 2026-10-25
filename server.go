@@ -230,7 +230,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "index.html 缺失", 500)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-cache")
+	// 移动端 WebView（尤其是带缓存策略的壳）会把 no-cache 当成“可缓存、不重验”，
+	// 页面就会一直停在旧版本：新增的 app.js?v=N 永远拿不到。必须 no-store。
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
 }
@@ -259,6 +263,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		// 同上：/config 之前没有任何缓存头，WebView 会长期缓存（真机日志里读到过
+		// 一小时前的 version=0.2.0），升级提示/版本判断都会因此失真。
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, s.configView())
 	case http.MethodPut:
 		s.handleConfigUpdate(w, r)

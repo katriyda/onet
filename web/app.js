@@ -3,6 +3,15 @@
 (() => {
 
 const $ = (sel, root = document) => root.querySelector(sel);
+// 真机排查用：日志里必须能看出当前跑的是哪份资源。移动端 WebView 的缓存会把页面
+// 停在旧版本（服务器端已改 no-store），这个值来自 <script src="/static/app.js?v=N">。
+const APP_BUILD = (() => {
+  try {
+    const src = (document.currentScript && document.currentScript.src) || '';
+    const m = /[?&]v=(\d+)/.exec(src);
+    return m ? m[1] : '?';
+  } catch { return '?'; }
+})();
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const versionLabel = (v) => {
   if (!v) return '';
@@ -330,7 +339,7 @@ function showBootError(message) {
 
 async function boot() {
   logEvent('info', 'client.boot',
-    'href=' + safeLocation() + ' ua=' + navigator.userAgent + ' lang=' + navigator.language);
+    'app=' + APP_BUILD + ' href=' + safeLocation() + ' ua=' + navigator.userAgent + ' lang=' + navigator.language);
   if (bootError) bootError.hidden = true;
 
   const qs = new URLSearchParams(location.search);
@@ -699,7 +708,8 @@ function commitViewport() {
     ' pan=' + (panned ? 1 : 0) +
     ' alt=' + (isAltBuffer() ? 1 : 0) +
     ' n=' + changes +
-    ' dt=' + settleDt);
+    ' dt=' + settleDt +
+    ' v=' + APP_BUILD);
   // fit 之后 viewport/scroll-area 的同步是延后的，同一帧 scrollToBottom 会落在旧
   // scrollHeight 上（差 1–2 行）。统一走延后重试，尺寸稳定后只回到底部一次。
   if (atEnd) settleAnchorBottom();

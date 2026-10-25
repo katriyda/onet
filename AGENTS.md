@@ -32,7 +32,7 @@
 - **冻结期间只平移，且必须一次性贴住**：`vpPan` 只在 `!isAltBuffer()` 且缓冲区铺满屏幕/有底部意图时为真——alt 缓冲没有回滚区，平移量提交后无法被 `scrollToBottom()` 补偿，应用收到 SIGWINCH 又会整屏重绘回自己的视图，所以 alt 只冻结行数。平移的目标是 `h - vpFrozenH`，**直接赋值不做缓动**：缓动（旧的 `VP_EASE`/`vpStep`）会被看成“内容又滚了一下”，而且提交时位置对不上；`commitViewport()` 里 `fitTerm(true)` 之后必须同帧 `term.scrollToBottom()` 一次，否则会先画一帧旧滚动位置再被延后重试拉回（“抽动一下”）。提交要早：`VP_SETTLE_MS=60` + `scheduleResize` 40ms，让本地重排、PTY resize、应用重绘都落在系统键盘动画（200–300ms）里；调大这些值会让应用那次重绘在键盘停稳后单独“抽动”。`client.vp.settle` 里的 `n=`（本次冻结高度变了几次）和 `dt=`（首帧到提交的毫秒）就是用来判断真机是否逐帧上报、提交是否还在动画窗口内的，别删
 - **`#app` 是固定壳**：`position:fixed` + JS 同时写 `top`（`vv.offsetTop`，coarse pointer 才跟）和 `height`（`vv.height`），`--vv-top` 用同一个 clamp 后的值；页面自身必须 `scrollY === 0`（`resetPageScroll` 兜底）。别改回只跟 `vv.height`——visual viewport 被平移时整个 app 会落到可见区外。chrome（`#header`/`#select-bar`/`#scroll-pill`/`#placeholder`）用 `touch-action` 隔离，抽屉/菜单/日志体保留 `pan-y`
 - 桌面模式（鼠标窗口拖拽）不走冻结路径，保持逐帧 fit；判断依据是 `(pointer: coarse)`（触屏），别改成按布局模式或删掉——窄窗口 + 鼠标会因此丢掉实时重排
-- `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS
+- `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS。**`/` 和 `/config` 必须是 `Cache-Control: no-store`**（已加 `Pragma`/`Expires`）：Android WebView 会把 `no-cache` 当“可缓存不重验”，页面就一直停在旧版本（真机一次升级后日志里还能读到 `version=0.2.0`、`app.js?v=32`）；`app.js` 顶部的 `APP_BUILD` 会写进 `client.boot`（`app=`）和 `client.vp.settle`（`v=`），排查“真机到底跑哪份资源”先看这个字段
 - 会话恢复顺序：URL `?s=` > `localStorage.onet_last_session` > `sessionStorage` 兜底。只在 `attached` 后写记录；Android WebView 刷新经常回退到 `/`（丢掉 `?s=`）且 `sessionStorage` 不跨实例，改用 localStorage 才能留在原会话，别改回只用 sessionStorage
 - 新增操作一律走统一的 `showMenu()`：移动端底部操作表、桌面锚定浮层，同一套图标/文案/危险色，别再造第二套菜单
 
