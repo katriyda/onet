@@ -477,11 +477,10 @@ window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 // 软键盘弹起/收起时，可视区高度是一帧一帧变的。以前每帧都 fit 一次：xterm
 // 每跨过一个字符高度就 reflow 一次，还会把中间尺寸发给 PTY（ConPTY 重排 +
 // shell 重绘），视觉上就是“卡一下、跳一行”。
-// 现在：高度变化期间冻结 xterm 尺寸，只平移 #term 让底边贴着可视区连续滑动；
+// 现在：高度变化期间冻结 xterm 尺寸，直接把 #term 平移到新位置让底边贴住可视区
+// （不做缓动：键盘本身就是一次跳变，动画只会被看成“又滚了一下”）；
 // 尺寸稳定 VP_SETTLE_MS 后再一次性 fit + resize。行数没变 → 不动画。
 const VP_SETTLE_MS = 140;
-const VP_EASE = 0.5;           // 大跳变时每帧逼近目标的比例（~4 帧收敛）
-const VP_FOLLOW_PX = 48;       // 单次变化小于此值：直接贴住键盘边（不产生滞后）
 const BOTTOM_INTENT_MS = 2000; // 触摸开始时在底部 → 这段时间内的视口变化仍锚底
 const coarsePointer = matchMedia('(pointer: coarse)');
 
@@ -490,9 +489,6 @@ let layoutSmooth = false;
 let termHeight = 0;            // 最近一次布局后 #term 的高度
 let vpFrozenH = 0;             // 冻结期间 #term 的像素高度（0 = 未冻结）
 let vpPan = false;             // 是否把底边钉在可视区底部（缓冲区未填满时不钉）
-let vpTarget = 0;              // 目标位移（让底边贴住 term-wrap 底边）
-let vpOffset = 0;              // 当前位移
-let vpRaf = 0;
 let vpSettleTimer = 0;
 let bottomIntentAt = 0;        // 用户最近一次在底部点击/聚焦的时间，0 = 无意图
 let vpForceBottom = false;     // 本次冻结是否来自“底部意图”
@@ -579,16 +575,14 @@ function syncViewport(smooth) {
     vpFrozenH = termHeight;
     const bottomIntent = bottomIntentWanted();
     vpForceBottom = bottomIntent;
-    const tui = isAltBuffer() || tuiPaints();
-    // alt 缓冲（less/vim）没有回滚区，平移量在提交后无法被 scrollToBottom 补偿；
-    // 内联 TUI（omp/htop…，普通缓冲但持续用光标定位重绘）平移后又会被自己画回去。
-    // 两者都只冻结行数、不平移：动画期间不位移，尺寸稳定后由应用重绘一次。
-    vpPan = !tui && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
-    vpTarget = vpOffset = 0;
+    // alt 缓冲（less/vim）没有回滚区（scrollHeight == clientHeight），平移量提交后
+    // 无法被 scrollToBottom 补偿，应用收到 SIGWINCH 又会整屏重绘回自己的视图，
+    // 平移只会变成“滑上去再被拉回”。这类缓冲只冻结行数、不平移。
+    vpPan = !isAltBuffer() && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
     termEl.style.height = vpFrozenH + 'px';
     if (vpPan) termEl.style.willChange = 'transform';
     logEvent('debug', 'client.vp.freeze',
-      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent + ' tui=' + tui);
+      'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent);
   }
 
   if (h !== termHeight || !vpSettleTimer) {
@@ -597,54 +591,22 @@ function syncViewport(smooth) {
   }
   termHeight = h;
   if (!vpPan) return;          // 短缓冲区/已滚回：保持顶部对齐，只冻结行数
-  const nextTarget = h - vpFrozenH;
-  const delta = Math.abs(nextTarget - vpTarget);
-  vpTarget = nextTarget;
-  if (delta <= VP_FOLLOW_PX) {
-    // 键盘动画的逐帧事件：直接贴住，不能有跟随滞后（否则底部行会被键盘边裁掉）。
-    if (vpRaf) { cancelAnimationFrame(vpRaf); vpRaf = 0; }
-    vpOffset = vpTarget;
-    applyViewportTransform();
-  } else {
-    // 视口一次性跳变（粗粒度 resize）：短缓动跟上，避免“瞬间移动”。
-    stepViewport();
-  }
+  // 直接贴住目标，不做缓动：键盘事件本身就是一次跳变，逐帧缓动反而会被看成
+  // “内容又滚了一下”，并让提交前后的位置对不上。
+  applyViewportTransform(h - vpFrozenH);
 }
 
-function applyViewportTransform() {
-  termEl.style.transform = 'translate3d(0,' + vpOffset.toFixed(2) + 'px,0)';
-}
-
-// 位移用 rAF 缓动而不是 CSS transition：每帧都有新目标时不会被重置，
-// 提交前也能保证已经收敛到目标位置，不会在 fit 时再抖一下。
-function stepViewport() {
-  if (!vpFrozenH || vpRaf) return;
-  vpRaf = requestAnimationFrame(vpStep);
-}
-
-function vpStep() {
-  vpRaf = 0;
-  if (!vpFrozenH) return;
-  const diff = vpTarget - vpOffset;
-  if (Math.abs(diff) < 0.5) {
-    if (vpOffset === vpTarget) return;
-    vpOffset = vpTarget;
-  } else {
-    vpOffset += diff * VP_EASE;
-  }
-  applyViewportTransform();
-  if (vpOffset !== vpTarget) vpRaf = requestAnimationFrame(vpStep);
+function applyViewportTransform(offset) {
+  termEl.style.transform = 'translate3d(0,' + offset + 'px,0)';
 }
 
 function endViewportFreeze() {
   if (!vpFrozenH) return false;
-  if (vpRaf) { cancelAnimationFrame(vpRaf); vpRaf = 0; }
   clearTimeout(vpSettleTimer);
   vpSettleTimer = 0;
   vpFrozenH = 0;
   vpPan = false;
   vpForceBottom = false;
-  vpTarget = vpOffset = 0;
   termEl.style.height = '';
   termEl.style.transform = '';
   termEl.style.willChange = '';
@@ -659,6 +621,9 @@ function commitViewport() {
   endViewportFreeze();
   lastFitKey = '';
   fitTerm(true);               // 触发 term.onResize → 延迟 80ms 发一次 resize
+  // fit 之后 viewport/scroll-area 的同步是延后的，但同一帧先归位一次能把“提交后
+  // 先露一帧旧滚动位置”的抽动消掉；差 1–2 行由 settleAnchorBottom 的重试补齐。
+  if (atEnd) term.scrollToBottom();
   termHeight = viewportHeight();
   const vv = window.visualViewport;
   logEvent('info', 'client.vp.settle',
@@ -1447,54 +1412,6 @@ function b64ToBytes(b64) {
   return out;
 }
 
-// TUI（omp / htop / 进度条等）会持续用光标定位、隐藏光标、同步输出重绘自己那一屏。
-// 这类应用在键盘动画里平移必然和它自己的重绘打架：先被平移滑上去、提交后它按新行数
-// 又画回自己的视图，观感就是“滚动两下”。所以它们的冻结只保行数、不平移。
-// 判定只看最近一段时间有没有出现这类序列，普通逐行输出（shell/日志/编译）不会命中。
-const TUI_QUIET_MS = 1500;
-let tuiPaintAt = 0;
-let tuiScanCarry = new Uint8Array(0);
-
-function noteTermBytes(bytes) {
-  // 跨帧的序列（ESC 在上一块末尾）用 12 字节回看窗口拼起来再扫。
-  const carry = tuiScanCarry.length;
-  let buf = bytes;
-  if (carry) {
-    buf = new Uint8Array(carry + bytes.length);
-    buf.set(tuiScanCarry, 0);
-    buf.set(bytes, carry);
-  }
-  const len = buf.length;
-  for (let i = 0; i + 1 < len; i++) {
-    if (buf[i] !== 0x1b || buf[i + 1] !== 0x5b) continue;          // ESC [
-    let j = i + 2;
-    const priv = buf[j] === 0x3f;                                  // '?' 私有模式（?25l / ?1049h / ?2026h）
-    if (priv) j++;
-    let digits = 0;
-    let ok = false;
-    for (; j < len; j++) {
-      const c = buf[j];
-      if (c >= 0x30 && c <= 0x39) { if (++digits > 4) break; continue; }
-      if (c === 0x3b && digits) { digits = 0; continue; }           // ';'
-      ok = c === 0x48 || c === 0x66 || c === 0x6c || (priv && c === 0x68); // H/f/l/?h
-      break;
-    }
-    if (ok) { tuiPaintAt = performance.now(); break; }
-  }
-  tuiScanCarry = buf.slice(len > 12 ? len - 12 : 0);
-}
-
-function tuiPaints() {
-  return tuiPaintAt > 0 && performance.now() - tuiPaintAt <= TUI_QUIET_MS;
-}
-
-function writeOutput(b64) {
-  const bytes = b64ToBytes(b64);
-  noteTermBytes(bytes);
-  term.write(bytes, () => updateScrollPill());
-}
-
-
 function handleMsg(buf) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(buf)); } catch { return; }
@@ -1553,7 +1470,7 @@ function handleMsg(buf) {
         SESSION_SEQ.set(msg.id, msg.seq);
       }
       if (!atBottom()) unseenOutput = true;
-      writeOutput(msg.data);
+      term.write(b64ToBytes(msg.data), () => updateScrollPill());
       break;
     }
     case 'exit':
@@ -1589,7 +1506,7 @@ function handleMsg(buf) {
       if (!attachedFirst) {
         // 旧服务端在 attached 之前发了 output；按到达顺序补写。
         for (const m of early) {
-          if (term && m.data) writeOutput(m.data);
+          if (term && m.data) term.write(b64ToBytes(m.data), () => updateScrollPill());
           if (typeof m.seq === 'number') SESSION_SEQ.set(msg.id, m.seq);
         }
       }
