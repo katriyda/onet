@@ -187,3 +187,25 @@
 - meta: commit=279f693 tag=v0.5.4 files=web/app.js,web/index.html,README.md,AGENTS.md
 
 
+## 2026-10-25 17:35 — 键盘弹出/收起“抽动一下”：平移改为一帧贴住 + 提交同帧归位
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户报 v0.5.4 后“输入法弹出和关掉终端内容会抽动一下”，确认现象并修掉
+- 做了什么:
+  - 复现并量化（隔离实例 7682 + Chromium，15ms 采样）：v0.5.4 对 TUI 不平移 → 冻结期间可视区停在冻结网格的**顶部**（`first=sim transcript line 92`），提交后跳到**底部**（`line 121/307→297`），一次 ~30 行的瞬移 = 用户的“抽动”
+  - 同时发现 v0.5.4 的 TUI 判定（扫 `ESC[?25l`/CUP）会误判普通 pwsh 输出（`freeze ... tui=true`，普通输出反而不再平移）——信号不够可靠，整块删除
+  - `web/app.js`：`vpPan` 回到 `!isAltBuffer() && (...)`；平移改为**直接赋目标值**（删掉 `VP_EASE`/`VP_FOLLOW_PX`/`vpStep`/`vpTarget`/`vpOffset`/`vpRaf`），注释说明缓动会被看成“又滚了一下”；`commitViewport()` 在 `fitTerm(true)` 之后同帧 `term.scrollToBottom()`（延后重试只在差 1–2 行时补齐），消除“先露一帧旧滚动位置”
+  - `app.js?v=31`；README/AGENTS 更新为“冻结期间只平移、必须一帧贴住、提交同帧归位；不要用输出序列猜 TUI”
+- 产出: web/app.js、web/index.html、README.md、AGENTS.md；提交 0cd8541；tag/Release v0.5.5
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例（TUI 模拟器 / 普通输出 / less）：
+  - TUI 模拟器：冻结期间 transform 恒为单值 `-290px`（无缓动帧），可视首行 92→123（贴底），提交后 124/125（应用自绘 1 行内），`freeze pan=true`、`settle pan=1 alt=0`
+  - 普通输出：`row 20 → row 51（贴底）→ row 52`，`sc=1044=sh-ch`，`pan=1 alt=0`
+  - less（alt）：无 transform，`pan=0 alt=1`
+  - 现场 omp 会话（7681，v31）：收缩 33→16、扩张 16→33，两个方向 transform 都是 16ms 内一次到位的单值，最后一行（omp 状态框）在两方向都不变位；`settle vvh=420/710 ... pan=1 alt=0`
+  - 发布：CI/Release 绿（9 资产）；`POST /update` 0.5.4→0.5.5（`/healthz version=0.5.5,resumed=true`，页面引用 `app.js?v=31`）
+  - 遗留：omp 收到 SIGWINCH 后自己的重绘（行数真的变了）仍是唯一可见变化；若真机仍觉得明显，下一轮可缩短 `VP_SETTLE_MS`/`scheduleResize` 让那次重绘落在键盘动画期间
+- meta: commit=0cd8541 tag=v0.5.5 files=web/app.js,web/index.html,README.md,AGENTS.md
+
+
+
