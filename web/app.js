@@ -517,6 +517,7 @@ let vpAnim = 0;                // 动画 rAF
 let vpCommitPending = false;   // 提交撞上动画：等动画收尾再提交
 let bottomIntentAt = 0;        // 用户最近一次在底部点击/聚焦的时间，0 = 无意图
 let vpForceBottom = false;     // 本次冻结是否来自“底部意图”
+let wrapScrollAt = 0;          // 上一次 #term-wrap 被外力滚动的日志时间（诊断节流）
 let anchorSeq = 0;             // 取消延后锚定的令牌
 let lastScrollResetLogAt = 0;
 
@@ -724,7 +725,9 @@ function commitViewport() {
     const vv = window.visualViewport;
     logEvent('info', 'client.vp.hold',
       'vvh=' + Math.round(vv ? vv.height : window.innerHeight) +
+      ' vvt=' + Math.round(vv ? vv.offsetTop : 0) +
       ' rows=' + term.rows +
+      ' wsc=' + Math.round((termEl.parentElement && termEl.parentElement.scrollTop) || 0) +
       ' pan=' + (vpPan ? 1 : 0) +
       ' off=' + Math.round(vpOffset) +
       ' n=' + changes +
@@ -749,7 +752,9 @@ function commitViewport() {
   const vv = window.visualViewport;
   logEvent('info', 'client.vp.settle',
     'vvh=' + Math.round(vv ? vv.height : window.innerHeight) +
+    ' vvt=' + Math.round(vv ? vv.offsetTop : 0) +
     ' top=' + Math.round(parseFloat(app.style.top) || 0) +
+    ' wsc=' + Math.round((termEl.parentElement && termEl.parentElement.scrollTop) || 0) +
     ' ih=' + Math.round(window.innerHeight) +
     ' sy=' + Math.round(window.scrollY || 0) +
     ' rows=' + term.rows +
@@ -922,6 +927,23 @@ function initTerm() {
   fit = new window.FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(termEl);
+
+  // 键盘弹起时浏览器会为“露出光标”去滚最近的滚动祖先；#term-wrap 一旦被滚动，
+  // 整块终端会整体位移，再叠加我们自己的平移就是“内容滚一下/两下”（任何应用都会）。
+  // CSS 已用 overflow:clip 禁止滚动，这里再兜一层并留日志，便于真机确认。
+  const wrapEl = termEl.parentElement;
+  if (wrapEl) {
+    wrapEl.addEventListener('scroll', () => {
+      const sc = wrapEl.scrollTop;
+      if (!sc && !wrapEl.scrollLeft) return;
+      wrapEl.scrollTop = 0;
+      wrapEl.scrollLeft = 0;
+      if (sc && performance.now() - wrapScrollAt > 800) {
+        wrapScrollAt = performance.now();
+        logEvent('info', 'client.vp.wrapscroll', 'sc=' + Math.round(sc) + ' v=' + APP_BUILD);
+      }
+    }, { passive: true });
+  }
 
   // 非触摸的聚焦路径（外接键盘/程序 focus）也记底部意图；只在确实在底部时刷新，
   // 不能用 false 覆盖 touchstart 刚记下的意图。

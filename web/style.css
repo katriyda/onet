@@ -307,13 +307,19 @@ body.mode-mobile #header, #select-bar, #scroll-pill, #scrim, #placeholder { touc
   flex: 1;
   position: relative;
   min-height: 0;
+  /* clip 而不是 hidden：hidden 仍是可编程滚动的容器，键盘弹起时浏览器为了露出
+     光标会去滚最近的滚动祖先，把整块终端顶走（任何应用都会“内容滚一下”）。
+     clip 直接禁止滚动，滚动条也不需要。 */
   overflow: hidden;
+  overflow: clip;
   background: var(--bg);
 }
 #term {
   position: absolute;
   inset: 0;
   padding: 4px 6px 2px;
+  overflow: hidden;
+  overflow: clip;
 }
 #term .xterm { height: 100%; }
 #term .xterm-viewport {
