@@ -26,6 +26,7 @@ func TestHandoffStateRoundTrip(t *testing.T) {
 			ExitCode: 137,
 		}},
 		ListenerFD: 42,
+		Rebind:     true,
 	}
 	if err := writeHandoffState(path, want); err != nil {
 		t.Fatalf("writeHandoffState: %v", err)

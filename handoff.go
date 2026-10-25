@@ -50,6 +50,7 @@ type handoffState struct {
 	Seq        int              `json:"seq"`
 	Sessions   []handoffSession `json:"sessions"`
 	ListenerFD int              `json:"listener_fd,omitempty"` // Unix
+	Rebind     bool             `json:"rebind,omitempty"`      // 配置改动监听地址：新进程重新 bind
 }
 
 // writeHandoffState 原子写入状态文件；新进程只会在父进程完成后读取。

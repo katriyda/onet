@@ -99,7 +99,7 @@ func TestExtractTarGz(t *testing.T) {
 	tw := tar.NewWriter(gz)
 	entries := []struct{ name, body string }{
 		{"onet-linux-amd64/README.md", "readme"},
-		{"onet-linux-amd64/config.example.json", "{}"},
+		{"onet-linux-amd64/LICENSE", "license"},
 		{"onet-linux-amd64/onet", "fake-binary"},
 	}
 	for _, e := range entries {

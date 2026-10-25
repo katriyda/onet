@@ -68,7 +68,7 @@
 
 ## 安全（硬线）
 
-默认 `127.0.0.1` 无认证；`token` 非空后 `/config`、`/logs`、`/update`、`/ws` 强制认证。`/` 与 `/static/` 故意公开（登录页自举）；`/config` 不回传 token。`POST /update` 会替换当前二进制并切换进程，自定义头只防 CSRF，不是额外权限。传输明文 HTTP，TLS 交给反代/Tailscale。会话内是完整 shell——放宽监听/认证前必须先向用户说明风险并获确认。
+首次启动自动生成 `config.json`：默认 `127.0.0.1` + 随机 256 位 token，文件权限 0600；已有配置保持原值（空 token + 回环仍兼容）。`token` 非空后 `/config`、`/logs`、`/update`、`/ws` 强制认证；`/` 与 `/static/` 故意公开（登录页自举）；`GET /config` 不回传 token（只给 `token_set`）。`PUT /config` 原子保存并可交接重启，必须带 `X-Onet-Config: 1`；`POST /update` 会替换当前二进制并切换进程，必须带 `X-Onet-Update: 1`。两个自定义头只防 CSRF，不是额外权限。改监听地址时 `handoffState.Rebind=true`，新进程重新 bind，不能复用旧 socket。传输明文 HTTP，TLS 交给反代/Tailscale。会话内是完整 shell——放宽监听/认证前必须先向用户说明风险并获确认。
 
 ## 协作
 

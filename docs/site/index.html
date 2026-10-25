@@ -166,7 +166,7 @@ tablet  ── ws ──┘            └── 64 KB replay ring</pre>
             </tbody>
           </table>
         </div>
-        <p class="fine">SHA256 sums: <a href="https://github.com/katriyda/onet/releases/latest/download/checksums.txt"><code>checksums.txt</code></a>. Archives contain the binary, README, and config.example.json. No installer, no dependencies.</p>
+        <p class="fine">SHA256 sums: <a href="https://github.com/katriyda/onet/releases/latest/download/checksums.txt"><code>checksums.txt</code></a>. Archives contain the binary and README; config.json is generated on first launch. No installer, no dependencies.</p>
       </div>
 
       <div class="lane">
@@ -218,7 +218,7 @@ go build -o onet .
   <section id="config" class="section">
     <div class="wrap">
       <h2><span class="num">04 //</span> CONFIG</h2>
-      <p class="section-intro">config.json is optional and lives next to the binary; -config points elsewhere.</p>
+      <p class="section-intro">config.json is generated on first launch next to the binary; -config points elsewhere. Edit it from the web UI (⋯ → Settings), then save and restart.</p>
 
       <div class="copy-wrap"><pre data-copy>{
   "host": "127.0.0.1",
@@ -251,6 +251,8 @@ go build -o onet .
         </table>
       </div>
 
+      <p class="section-note">The generated file binds <code>127.0.0.1</code> and contains a random 256-bit token (mode <code>0600</code>). Saving from the web UI writes the file atomically; <em>Save &amp; restart</em> hands the live PTYs over to a new process, so sessions survive. <code>GET /config</code> never returns the token; <code>PUT /config</code> requires <code>X-Onet-Config: 1</code>.</p>
+
       <p><a href="https://github.com/katriyda/onet#配置">Full configuration reference →</a></p>
     </div>
   </section>
@@ -261,12 +263,12 @@ go build -o onet .
       <p class="section-intro">This is a shell, not a dashboard.</p>
 
       <ol class="sec-list">
-        <li><strong>Loopback by default.</strong> onet listens on 127.0.0.1:7681 with no authentication.</li>
-        <li><strong>Public bind without a token is refused.</strong> A non-loopback host with an empty token stops at startup. <code>allow_insecure: true</code> is the explicit override and logs a warning.</li>
+        <li><strong>Loopback + token by default.</strong> The generated config listens on 127.0.0.1:7681 and contains a random 256-bit token. Older configs with an empty token still work on loopback only.</li>
+        <li><strong>Public bind without a token is refused.</strong> A non-loopback host with an empty token is rejected at startup and when saving settings. <code>allow_insecure: true</code> is the explicit override and logs a warning.</li>
         <li><strong>A token is a shell.</strong> It protects <code>/config</code>, <code>/logs</code>, <code>/update</code>, and <code>/ws</code>. Anyone holding it has a shell on the machine.</li>
       </ol>
 
-      <p class="section-note">Transport is plain HTTP. Terminate TLS in Caddy or nginx, or use Tailscale Serve. POST <code>/update</code> additionally requires the same-origin header <code>X-Onet-Update: 1</code> to block CSRF.</p>
+      <p class="section-note">Transport is plain HTTP. Terminate TLS in Caddy or nginx, or use Tailscale Serve. POST <code>/update</code> additionally requires the same-origin header <code>X-Onet-Update: 1</code>; PUT <code>/config</code> requires <code>X-Onet-Config: 1</code> to block CSRF.</p>
     </div>
   </section>
 

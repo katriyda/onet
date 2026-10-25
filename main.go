@@ -59,12 +59,20 @@ func runServer(configPath string) int {
 	closeLog := setupLogging(cfg)
 	defer closeLog()
 
+	if cfg.generated {
+		fmt.Fprintf(os.Stderr, "已生成默认配置 %s：监听 %s:%d，随机访问令牌已写入该文件\n",
+			configPath, cfg.Host, cfg.Port)
+		appLog.Info("config.generated", "path", configPath, "host", cfg.Host, "port", cfg.Port,
+			"detail", "已写入随机 token；从配置文件读取后登录")
+	}
+
 	if err := validateConfig(cfg); err != nil {
 		appLog.Error("app.start_refused", "err", err)
 		return 1
 	}
 
 	srv := NewServer(cfg)
+	srv.configPath = configPath
 	mgr := NewManager(cfg, srv.broadcastSessions)
 	srv.mgr = mgr
 
@@ -108,6 +116,7 @@ func runServer(configPath string) int {
 	logPath, _ := activeLogPath.Load().(string)
 	appLog.Info("app.start",
 		"addr", srv.addr,
+		"config", configPath,
 		"version", version,
 		"resumed", restored != nil,
 		"ui", cfg.UI,
@@ -170,13 +179,16 @@ func (s *Server) startServe(ln net.Listener) {
 
 // listen 优先复用交接过来的监听 socket；Unix 上失败可重新 bind。
 func (s *Server) listen(st *handoffState) (net.Listener, error) {
-	if st != nil && handoffInheritsListener() {
+	if st != nil && handoffInheritsListener() && !st.Rebind {
 		if ln, err := listenerFromHandoff(st); err == nil {
 			appLog.Info("app.listen_inherited", "addr", s.addr)
 			return ln, nil
 		} else {
 			appLog.Warn("app.listen_inherit_failed", "addr", s.addr, "err", err)
 		}
+	}
+	if st != nil && st.Rebind {
+		appLog.Info("app.listen_rebind", "addr", s.addr)
 	}
 	return net.Listen("tcp", s.addr)
 }

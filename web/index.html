@@ -7,7 +7,7 @@
 <meta name="color-scheme" content="dark">
 <title>onet</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css?v=1">
-<link rel="stylesheet" href="/static/style.css?v=10">
+<link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false"><defs>
@@ -27,6 +27,7 @@
   <symbol id="i-font" viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></symbol>
 </defs></svg>
 
 <div id="app">
@@ -135,7 +136,7 @@
 <div id="login" hidden>
   <form id="login-form">
     <h1>onet</h1>
-    <p class="login-hint">需要访问令牌</p>
+    <p class="login-hint">需要访问令牌（见 onet 同目录的 config.json）</p>
     <input id="login-token" type="password" placeholder="token" autocomplete="off" autocapitalize="off" spellcheck="false">
     <button type="submit" class="btn primary full">登录</button>
     <p id="login-err" hidden></p>
@@ -145,6 +146,116 @@
 <div id="boot-error" role="alert" hidden>
   <p id="boot-error-text">无法连接服务器</p>
   <button id="boot-retry" class="btn primary">重试</button>
+</div>
+
+<div id="settings-layer" hidden>
+  <section id="settings-panel" role="dialog" aria-modal="true" aria-label="设置" tabindex="-1">
+    <form id="settings-form" autocomplete="off">
+      <div id="settings-head">
+        <div>
+          <div class="sheet-title">设置</div>
+          <div class="sheet-sub" id="settings-sub">config.json</div>
+        </div>
+        <button id="settings-close" type="button" class="icon-btn" aria-label="关闭设置"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+      </div>
+
+      <div id="settings-body">
+        <fieldset class="settings-group">
+          <legend>监听</legend>
+          <div class="settings-grid">
+            <label class="settings-field">监听地址
+              <input id="set-host" class="settings-input" type="text" spellcheck="false" placeholder="127.0.0.1">
+            </label>
+            <label class="settings-field">端口
+              <input id="set-port" class="settings-input" type="number" min="1" max="65535" inputmode="numeric">
+            </label>
+          </div>
+          <p class="settings-hint">默认只监听 127.0.0.1。改为 0.0.0.0 前请确认已设置访问令牌。</p>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>认证</legend>
+          <label class="settings-field">访问令牌 <span id="set-token-state" class="settings-tag"></span>
+            <input id="set-token" class="settings-input" type="password" spellcheck="false" autocapitalize="off" placeholder="留空保持当前令牌">
+          </label>
+          <div class="settings-actions">
+            <button id="set-token-gen" type="button" class="btn small">生成随机令牌</button>
+            <label class="settings-check"><input id="set-clear-token" type="checkbox"> 清除令牌</label>
+          </div>
+          <p class="settings-hint">令牌用于保护终端、配置和日志接口。生成后请保存好；留空表示不修改。</p>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>会话</legend>
+          <label class="settings-field">Shell
+            <input id="set-shell" class="settings-input" type="text" spellcheck="false" placeholder="平台默认">
+          </label>
+          <label class="settings-field">工作目录
+            <input id="set-cwd" class="settings-input" type="text" spellcheck="false" placeholder="用户主目录">
+          </label>
+          <div class="settings-grid">
+            <label class="settings-field">回滚行数
+              <input id="set-scrollback" class="settings-input" type="number" min="1" inputmode="numeric">
+            </label>
+            <label class="settings-field">初始字号
+              <input id="set-font-size" class="settings-input" type="number" min="1" inputmode="numeric">
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>界面</legend>
+          <label class="settings-field">布局
+            <select id="set-ui" class="settings-input">
+              <option value="auto">自动（按输入设备）</option>
+              <option value="mobile">强制移动端</option>
+              <option value="desktop">强制桌面端</option>
+            </select>
+          </label>
+          <label class="settings-field">额外按键（每行一个）
+            <textarea id="set-extra-keys" class="settings-input settings-textarea" rows="4" spellcheck="false" placeholder="ESC&#10;TAB&#10;CTRL&#10;ALT"></textarea>
+          </label>
+          <p class="settings-hint">特殊键：ESC / TAB / CTRL / ALT / ENTER / PGUP / PGDN / ↑↓←→；其余按字面量发送。</p>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>日志</legend>
+          <label class="settings-field">日志文件
+            <input id="set-log-file" class="settings-input" type="text" spellcheck="false" placeholder="留空仅输出到 stderr">
+          </label>
+          <div class="settings-grid">
+            <label class="settings-field">级别
+              <select id="set-log-level" class="settings-input">
+                <option value="debug">debug</option>
+                <option value="info">info</option>
+                <option value="warn">warn</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+            <label class="settings-field">单文件上限 (MB)
+              <input id="set-log-max-size" class="settings-input" type="number" min="0" max="1024" inputmode="numeric">
+            </label>
+            <label class="settings-field">保留份数
+              <input id="set-log-max-backups" class="settings-input" type="number" min="0" max="100" inputmode="numeric">
+            </label>
+          </div>
+          <label class="settings-check"><input id="set-log-terminal-io" type="checkbox"> 记录终端原始输入/输出（可能泄露密码）</label>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>安全</legend>
+          <label class="settings-check"><input id="set-allow-insecure" type="checkbox"> 允许非本机监听且无令牌（不推荐）</label>
+          <p class="settings-hint">不勾选时，监听非回环地址必须设置令牌，否则拒绝启动/保存。</p>
+        </fieldset>
+      </div>
+
+      <div id="settings-foot">
+        <button id="settings-cancel" type="button" class="btn small">取消</button>
+        <button id="settings-save" type="button" class="btn small">仅保存</button>
+        <button id="settings-apply" type="submit" class="btn small primary">保存并重启</button>
+      </div>
+    </form>
+  </section>
 </div>
 
 <div id="paste-layer" hidden>
@@ -162,6 +273,6 @@
 
 <script src="/static/vendor/xterm.js?v=1"></script>
 <script src="/static/vendor/addon-fit.js?v=1"></script>
-<script src="/static/app.js?v=19"></script>
+<script src="/static/app.js?v=20"></script>
 </body>
 </html>

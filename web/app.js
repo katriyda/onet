@@ -65,6 +65,11 @@ let updateBannerTimer = null;
 let updateVerifyTimer = null;
 let restartWatchdogTimer = null;
 
+// 设置面板：保存请求互斥，token_set 来自服务端（GET 不回传 token 本身）
+let settingsSaving = false;
+let settingsTokenSet = false;
+let settingsTrigger = null;
+
 let xtermViewport = null;
 let lastFitKey = '';
 let resizeTimer = null;
@@ -108,6 +113,9 @@ const updateBanner = $('#update-banner'), updateText = $('#update-text');
 const bootError = $('#boot-error'), bootErrorText = $('#boot-error-text'), bootRetry = $('#boot-retry');
 const pasteLayer = $('#paste-layer'), pasteInput = $('#paste-input');
 const pasteOk = $('#paste-ok'), pasteCancel = $('#paste-cancel');
+const settingsLayer = $('#settings-layer'), settingsForm = $('#settings-form'), settingsSub = $('#settings-sub');
+const settingsTokenInput = $('#set-token'), settingsClearToken = $('#set-clear-token');
+const settingsTokenState = $('#set-token-state');
 
 /* ---------------- 日志：客户端采集 → WS 回传 → 服务端 JSONL ---------------- */
 // 浏览器侧事件/异常先入内存队列，WS 可用时按批回传；未发出的部分写入
@@ -1775,8 +1783,8 @@ function closeDrawer({ restoreFocus = true } = {}) {
 
 function onDrawerKey(e) {
   if (e.key === 'Escape') {
-    // 只关最上层：日志/菜单/粘贴打开时留给它们处理。
-    if (!logLayer.hidden || menuOpen || !pasteLayer.hidden) return;
+    // 只关最上层：日志/设置/菜单/粘贴打开时留给它们处理。
+    if (!logLayer.hidden || !settingsLayer.hidden || menuOpen || !pasteLayer.hidden) return;
     e.preventDefault();
     closeDrawer();
     return;
@@ -1895,7 +1903,7 @@ function buildMenuItem(item) {
       item.fn();
       if (mode === 'desktop' && term) {
         setTimeout(() => {
-          if (!menuOpen && logLayer.hidden && pasteLayer.hidden) term.focus();
+          if (!menuOpen && logLayer.hidden && pasteLayer.hidden && settingsLayer.hidden) term.focus();
         }, 0);
       }
     });
@@ -1986,7 +1994,7 @@ function hideMenu(immediate = false, restoreFocus = true) {
   const finish = () => {
     menuLayer.hidden = true;
     menuEl.innerHTML = '';
-    if (restoreFocus && focusable(trigger) && logLayer.hidden && pasteLayer.hidden) {
+    if (restoreFocus && focusable(trigger) && logLayer.hidden && pasteLayer.hidden && settingsLayer.hidden) {
       trigger.focus();
     }
   };
@@ -2018,7 +2026,7 @@ function trapTab(e, container) {
 
 function onMenuKey(e) {
   if (e.key === 'Escape') {
-    if (!logLayer.hidden || !pasteLayer.hidden) return; // 上层优先
+    if (!logLayer.hidden || !settingsLayer.hidden || !pasteLayer.hidden) return; // 上层优先
     e.preventDefault();
     hideMenu();
     return;
@@ -2043,7 +2051,7 @@ function onMenuKey(e) {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || menuOpen) return;
   // 各浮层自己处理 Escape；这里只兜底清除终端选区。
-  if (!drawer.hidden || !logLayer.hidden || !pasteLayer.hidden) return;
+  if (!drawer.hidden || !logLayer.hidden || !settingsLayer.hidden || !pasteLayer.hidden) return;
   if (selection.active) { e.preventDefault(); clearSelection(); }
 });
 
@@ -2076,6 +2084,7 @@ function terminalMenu() {
   });
   items.push({ type: 'separator' });
   items.push({ label: '日志', icon: 'file', fn: openLogs });
+  items.push({ label: '设置', icon: 'settings', fn: openSettings });
   items.push({
     label: '检查更新',
     icon: 'download',
@@ -2265,6 +2274,260 @@ async function installUpdate(latest) {
   logEvent('info', 'client.update.restarting', 'from=' + data.from + ' to=' + data.to);
   showUpdateBanner('已安装 ' + versionLabel(data.to) + '，正在切换进程…', 'info', true);
   startRestartWatchdog();
+}
+
+/* ---------------- 设置（配置读写 + 应用重启） ---------------- */
+function setSettingsBusy(busy) {
+  settingsSaving = busy;
+  for (const id of ['settings-save', 'settings-apply', 'settings-cancel', 'settings-close']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  }
+}
+
+function refreshSettingsTokenState() {
+  if (!settingsTokenState) return;
+  let text;
+  let on;
+  if (settingsClearToken.checked) {
+    text = '将清除';
+    on = false;
+  } else if (settingsTokenInput.value) {
+    text = '将更新';
+    on = true;
+  } else {
+    text = settingsTokenSet ? '已设置' : '未设置';
+    on = settingsTokenSet;
+  }
+  settingsTokenState.textContent = text;
+  settingsTokenState.classList.toggle('on', on);
+}
+
+function fillSettings(c) {
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.value = v == null ? '' : String(v);
+  };
+  setVal('set-host', c.host);
+  setVal('set-port', c.port);
+  setVal('set-shell', c.shell);
+  setVal('set-cwd', c.cwd);
+  setVal('set-scrollback', c.scrollback);
+  setVal('set-font-size', c.font_size);
+  setVal('set-ui', c.ui || 'auto');
+  setVal('set-extra-keys', Array.isArray(c.extra_keys) ? c.extra_keys.join('\n') : '');
+  setVal('set-log-file', c.log_file);
+  setVal('set-log-level', c.log_level || 'info');
+  setVal('set-log-max-size', c.log_max_size_mb);
+  setVal('set-log-max-backups', c.log_max_backups);
+  const termIO = document.getElementById('set-log-terminal-io');
+  if (termIO) termIO.checked = !!c.log_terminal_io;
+  const insecure = document.getElementById('set-allow-insecure');
+  if (insecure) insecure.checked = !!c.allow_insecure;
+
+  settingsTokenSet = !!c.token_set;
+  settingsTokenInput.value = '';
+  settingsTokenInput.type = 'password';
+  settingsClearToken.checked = false;
+  refreshSettingsTokenState();
+  if (settingsSub) settingsSub.textContent = c.config_path || 'config.json';
+}
+
+async function openSettings() {
+  if (settingsSaving) return;
+  settingsTrigger = document.activeElement;
+  hideMenu(true, false);
+  settingsLayer.hidden = false;
+  if (term) term.blur();
+  document.addEventListener('keydown', onSettingsKey);
+  setSettingsBusy(true);
+  const closeBtn = document.getElementById('settings-close');
+  if (closeBtn) closeBtn.focus();
+  logEvent('debug', 'client.settings.open');
+  try {
+    const resp = await fetchWithTimeout('/config', { cache: 'no-store' }, 8000);
+    if (resp.status === 401) {
+      setSettingsBusy(false);
+      closeSettings(false);
+      showLogin();
+      return;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    fillSettings(await resp.json());
+    setSettingsBusy(false);
+    const host = document.getElementById('set-host');
+    if (focusable(host)) host.focus();
+  } catch (err) {
+    setSettingsBusy(false);
+    logEvent('warn', 'client.settings.fetch_failed', (err && err.message) || String(err));
+    showToast('读取配置失败: ' + ((err && err.message) || err), 4500, 'error');
+    closeSettings();
+  }
+}
+
+function closeSettings(restoreFocus = true) {
+  document.removeEventListener('keydown', onSettingsKey);
+  if (settingsLayer.hidden) return;
+  settingsLayer.hidden = true;
+  const trigger = settingsTrigger;
+  settingsTrigger = null;
+  if (restoreFocus && focusable(trigger)) trigger.focus();
+  else if (mode === 'desktop' && term) term.focus();
+}
+
+function onSettingsKey(e) {
+  if (e.key === 'Escape') {
+    if (settingsSaving) return;
+    e.preventDefault();
+    closeSettings();
+    return;
+  }
+  const panel = document.getElementById('settings-panel');
+  if (panel) trapTab(e, panel);
+}
+
+function splitExtraKeys(raw) {
+  return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+function settingsNumber(id, fallback = 0) {
+  const el = document.getElementById(id);
+  if (!el) return fallback;
+  const n = Number(el.value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function settingsPayload(restart) {
+  return {
+    host: document.getElementById('set-host').value.trim(),
+    port: settingsNumber('set-port'),
+    token: settingsTokenInput.value,
+    clear_token: settingsClearToken.checked,
+    shell: document.getElementById('set-shell').value,
+    cwd: document.getElementById('set-cwd').value,
+    scrollback: settingsNumber('set-scrollback'),
+    font_size: settingsNumber('set-font-size'),
+    ui: document.getElementById('set-ui').value,
+    extra_keys: splitExtraKeys(document.getElementById('set-extra-keys').value),
+    log_file: document.getElementById('set-log-file').value.trim(),
+    log_level: document.getElementById('set-log-level').value,
+    log_max_size_mb: settingsNumber('set-log-max-size'),
+    log_max_backups: settingsNumber('set-log-max-backups'),
+    log_terminal_io: document.getElementById('set-log-terminal-io').checked,
+    allow_insecure: document.getElementById('set-allow-insecure').checked,
+    restart: !!restart,
+  };
+}
+
+function generateSettingsToken() {
+  if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+    showToast('当前浏览器无法生成安全令牌', 4000, 'error');
+    return;
+  }
+  const buf = new Uint8Array(32);
+  window.crypto.getRandomValues(buf);
+  let bin = '';
+  for (const b of buf) bin += String.fromCharCode(b);
+  const token = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  settingsTokenInput.value = token;
+  settingsTokenInput.type = 'text';
+  settingsClearToken.checked = false;
+  refreshSettingsTokenState();
+  settingsTokenInput.focus();
+  settingsTokenInput.select();
+  showToast('已生成随机令牌，保存后生效；请妥善保存', 5000, 'warn');
+}
+
+async function saveSettings(restart) {
+  if (settingsSaving) return;
+  const payload = settingsPayload(restart);
+  if (!payload.host) {
+    showToast('监听地址不能为空', 3000, 'error');
+    return;
+  }
+  setSettingsBusy(true);
+  logEvent('info', 'client.config.save',
+    'restart=' + restart + ' host=' + payload.host + ' port=' + payload.port +
+    ' token=' + (payload.clear_token ? 'clear' : payload.token ? 'update' : 'keep'));
+  try {
+    const resp = await fetchWithTimeout('/config', {
+      method: 'PUT',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Onet-Config': '1' },
+      body: JSON.stringify(payload),
+    }, 20000);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 401) {
+      setSettingsBusy(false);
+      closeSettings(false);
+      showLogin();
+      return;
+    }
+    if (!resp.ok) {
+      setSettingsBusy(false);
+      logEvent('warn', 'client.config.save_failed', data.error || ('status=' + resp.status));
+      showToast(data.error || ('保存配置失败 (' + resp.status + ')'), 5000, 'error');
+      return;
+    }
+
+    logEvent('info', 'client.config.saved',
+      'restart=' + !!data.restarting + ' host=' + data.host + ' port=' + data.port +
+      ' token_changed=' + !!data.token_changed);
+    if (!restart) {
+      setSettingsBusy(false);
+      closeSettings(false);
+      showToast('配置已保存，重启后生效', 4000, 'success');
+      return;
+    }
+
+    closeSettings(false);
+    if (data.token_changed) showToast('访问令牌已更新，重启后需使用新令牌', 4000, 'warn');
+    const url = configRestartURL(data.host, data.port);
+    logEvent('info', 'client.config.restart', 'url=' + url);
+    await waitForConfigRestart(url);
+    setSettingsBusy(false);
+  } catch (err) {
+    setSettingsBusy(false);
+    logEvent('error', 'client.config.save_error', (err && err.message) || String(err));
+    showToast('保存配置失败: 无法连接服务器', 5000, 'error');
+  }
+}
+
+function isLoopbackName(host) {
+  const h = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return h === '' || h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+// 新监听地址 → 浏览器可访问的 URL；通配地址沿用当前主机名，端口不变时保留当前 origin。
+function configRestartURL(host, port) {
+  const cur = location;
+  const curPort = cur.port || (cur.protocol === 'https:' ? '443' : '80');
+  let h = String(host || '').trim().toLowerCase();
+  const wildcard = !h || h === '0.0.0.0' || h === '::' || h === '[::]';
+  const curLoop = isLoopbackName(cur.hostname);
+  const newLoop = isLoopbackName(h);
+  const bare = h.replace(/^\[|\]$/g, '');
+  const sameHost = wildcard || (newLoop && curLoop) || bare === cur.hostname.toLowerCase();
+  if (sameHost && Number(port) === Number(curPort)) return cur.origin + '/';
+  if (wildcard || (newLoop && curLoop)) h = cur.hostname;
+  h = h.replace(/^\[|\]$/g, '');
+  const hostPort = h.includes(':') ? '[' + h + ']' : h;
+  return cur.protocol + '//' + hostPort + ':' + port + '/';
+}
+
+async function waitForConfigRestart(url) {
+  showUpdateBanner('配置已保存，正在重启服务…', 'info', true);
+  await new Promise((r) => setTimeout(r, 1200));
+  const deadline = performance.now() + 30000;
+  while (performance.now() < deadline) {
+    try {
+      await fetchWithTimeout(url, { cache: 'no-store', mode: 'no-cors' }, 3000);
+      location.replace(url);
+      return;
+    } catch { /* 进程尚未监听，继续等 */ }
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  showUpdateBanner('配置已保存，但重启后无法连接；请手动刷新页面', 'error');
 }
 
 function toggleKeys() {
@@ -2696,6 +2959,32 @@ onTap($('#log-download'), downloadLogs);
 onTap(logTabClient, () => setLogSource('client'));
 onTap(logTabServer, () => setLogSource('server'));
 logLayer.addEventListener('pointerdown', (e) => { if (e.target === logLayer) closeLogs(); });
+
+/* ---------------- 设置绑定 ---------------- */
+if (settingsForm) {
+  settingsForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveSettings(true);
+  });
+}
+onTap($('#settings-close'), () => closeSettings());
+onTap($('#settings-cancel'), () => closeSettings());
+onTap($('#settings-save'), () => saveSettings(false));
+onTap($('#set-token-gen'), generateSettingsToken);
+settingsTokenInput.addEventListener('input', () => {
+  if (settingsTokenInput.value) settingsClearToken.checked = false;
+  refreshSettingsTokenState();
+});
+settingsClearToken.addEventListener('change', () => {
+  if (settingsClearToken.checked) {
+    settingsTokenInput.value = '';
+    settingsTokenInput.type = 'password';
+  }
+  refreshSettingsTokenState();
+});
+settingsLayer.addEventListener('pointerdown', (e) => {
+  if (!settingsSaving && e.target === settingsLayer) closeSettings();
+});
 
 /* ---------------- 手动粘贴面板 ---------------- */
 if (pasteOk) onTap(pasteOk, () => closePasteSheet({ insert: true }));

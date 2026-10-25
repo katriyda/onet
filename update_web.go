@@ -137,7 +137,7 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		time.Sleep(400 * time.Millisecond)
-		if err := s.beginHandoff(cand.Rel.Tag, exe); err != nil {
+		if err := s.beginHandoff(cand.Rel.Tag, exe, false); err != nil {
 			clearUpdating()
 			appLog.Error("app.handoff_failed", "err", err)
 			s.broadcastNotice("error", "更新失败: "+err.Error())
@@ -147,7 +147,8 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 }
 
 // beginHandoff 冻结会话、生成快照并交给平台实现执行切换。
-func (s *Server) beginHandoff(to, exe string) error {
+// rebind=true 表示监听地址已改变，新进程不能复用旧监听 socket。
+func (s *Server) beginHandoff(to, exe string, rebind bool) error {
 	s.handoffGuard.Lock()
 	defer s.handoffGuard.Unlock()
 
@@ -155,6 +156,7 @@ func (s *Server) beginHandoff(to, exe string) error {
 		return fmt.Errorf("已有更新正在进行")
 	}
 	st, sessions := snapshotHandoff(s.mgr)
+	st.Rebind = rebind
 	statePath, err := createHandoffStatePath()
 	if err != nil {
 		s.mgr.EndHandoff()

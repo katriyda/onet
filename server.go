@@ -28,10 +28,12 @@ import (
 var webFS embed.FS
 
 type Server struct {
-	cfg     Config
-	mgr     *Manager
-	mu      sync.Mutex
-	clients map[*Client]struct{}
+	cfg        Config
+	configPath string
+	configMu   sync.Mutex
+	mgr        *Manager
+	mu         sync.Mutex
+	clients    map[*Client]struct{}
 
 	addr    string
 	ln      net.Listener
@@ -249,23 +251,20 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 }
 
-// handleConfig 返回当前配置（token 不回传）。
+// handleConfig 返回当前配置（token 不回传）或保存网页提交的配置。
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, s.configView())
+	case http.MethodPut:
+		s.handleConfigUpdate(w, r)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	cfg := s.cfg
-	cfg.Token = ""
-	writeJSON(w, struct {
-		Config
-		Version      string       `json:"version"`
-		Capabilities capabilities `json:"capabilities"`
-	}{Config: cfg, Version: version, Capabilities: serverCapabilities()})
 }
 
 type loginReq struct {
@@ -301,14 +300,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	appLog.Info("auth.login", "ok", true, "remote", r.RemoteAddr)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "onet_token",
-		Value:    s.cfg.Token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   365 * 24 * 3600,
-	})
+	setOnetTokenCookie(w, s.cfg.Token)
 	w.WriteHeader(http.StatusNoContent)
 }
 

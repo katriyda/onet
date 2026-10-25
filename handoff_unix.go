@@ -94,20 +94,22 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 	}
 
 	var listenerFile *os.File
-	if tl, ok := s.ln.(*net.TCPListener); ok {
-		f, err := tl.File()
-		if err != nil {
-			cleanup()
-			return fmt.Errorf("复制监听 socket 失败: %w", err)
+	if !st.Rebind {
+		if tl, ok := s.ln.(*net.TCPListener); ok {
+			f, err := tl.File()
+			if err != nil {
+				cleanup()
+				return fmt.Errorf("复制监听 socket 失败: %w", err)
+			}
+			fd := int(f.Fd())
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+				_ = f.Close()
+				cleanup()
+				return fmt.Errorf("清除监听 fd CLOEXEC 失败: %w", err)
+			}
+			st.ListenerFD = fd
+			listenerFile = f
 		}
-		fd := int(f.Fd())
-		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
-			_ = f.Close()
-			cleanup()
-			return fmt.Errorf("清除监听 fd CLOEXEC 失败: %w", err)
-		}
-		st.ListenerFD = fd
-		listenerFile = f
 	}
 
 	stopSessionsForHandoff(sessions)
@@ -122,7 +124,19 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 		return fmt.Errorf("写入交接状态失败: %w", err)
 	}
 
-	appLog.Info("app.handoff_exec", "exe", exe, "sessions", len(sessions), "state", statePath)
+	// 监听地址改变时不能把旧 socket 带进 exec：关闭后由新进程按新配置 bind。
+	if st.Rebind {
+		s.handoffClosing.Store(true)
+		if err := s.ln.Close(); err != nil {
+			s.handoffClosing.Store(false)
+			_ = os.Remove(statePath)
+			resumeAfterFailedHandoff(sessions, st)
+			return fmt.Errorf("释放旧监听失败: %w", err)
+		}
+	}
+
+	appLog.Info("app.handoff_exec", "exe", exe, "sessions", len(sessions), "state", statePath,
+		"rebind", st.Rebind)
 	env := withHandoffEnv(os.Environ(), statePath)
 	argv := append([]string{exe}, os.Args[1:]...)
 	runtime.KeepAlive(listenerFile) // 保持 dup fd 存活到 exec
@@ -133,6 +147,12 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 			_ = listenerFile.Close()
 		}
 		resumeAfterFailedHandoff(sessions, st)
+		if st.Rebind {
+			if rerr := s.reopenListener(); rerr != nil {
+				appLog.Error("app.handoff_relisten_failed", "err", rerr)
+				return fmt.Errorf("启动新版本失败且无法恢复监听: %v; %w", rerr, err)
+			}
+		}
 		return fmt.Errorf("启动新版本失败: %w", err)
 	}
 	return nil

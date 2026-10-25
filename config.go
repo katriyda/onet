@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,8 +11,8 @@ import (
 	"strings"
 )
 
-// Config 是 onet 的可选 JSON 配置文件结构。
-// 文件缺失时全部使用默认值；文件存在时仅覆盖显式给出的字段。
+// Config 是 onet 的 JSON 配置文件结构。
+// 首次启动文件缺失时会生成一份带随机 token 的默认配置；文件存在时仅覆盖显式给出的字段。
 type Config struct {
 	Host       string   `json:"host"`       // 监听地址，默认 "127.0.0.1"
 	Port       int      `json:"port"`       // 监听端口，默认 7681
@@ -33,6 +35,7 @@ type Config struct {
 	AllowInsecure bool `json:"allow_insecure"`
 
 	logFileGiven bool // 非 JSON：配置文件是否显式给出 log_file
+	generated    bool // 非 JSON：本次启动是否刚刚生成配置文件
 }
 
 // DefaultConfig 返回全部字段取默认值的 Config。
@@ -58,16 +61,35 @@ func DefaultConfig() Config {
 	}
 }
 
-// Load 读取配置文件。文件不存在 → 默认值；存在 → 解析并逐字段回填默认值后校验。
+// generateToken 生成 256 位 URL 安全的访问令牌。
+func generateToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// Load 读取配置文件。文件不存在 → 生成带随机 token 的默认配置并落盘；
+// 存在 → 解析并逐字段回填默认值后校验。
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+		if !os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("读取配置文件 %s: %w", path, err)
 		}
-		return Config{}, fmt.Errorf("读取配置文件 %s: %w", path, err)
+		token, terr := generateToken()
+		if terr != nil {
+			return Config{}, fmt.Errorf("生成随机 token 失败: %w", terr)
+		}
+		cfg.Token = token
+		if err := Save(path, cfg); err != nil {
+			return Config{}, fmt.Errorf("生成默认配置文件 %s: %w", path, err)
+		}
+		cfg.generated = true
+		return cfg, nil
 	}
 
 	// 先解析到 map 以区分"显式给出的字段"，再回填。
@@ -140,6 +162,71 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// Save 原子写入配置文件（权限 0600，含 token）。
+// 位于配置文件目录内的日志绝对路径会改写成相对路径，便于整体迁移。
+func Save(path string, cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	out := cfg
+	out.generated = false
+	if rel, ok := relativeToConfigDir(path, cfg.LogFile); ok {
+		out.LogFile = rel
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".onet-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// relativeToConfigDir 把配置目录内的绝对路径改写成斜杠分隔的相对路径。
+func relativeToConfigDir(configPath, p string) (string, bool) {
+	if p == "" || !filepath.IsAbs(p) {
+		return "", false
+	}
+	rel, err := filepath.Rel(filepath.Dir(configPath), p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
 // isLoopbackHost 判断监听地址是否只对本机可见。
 func isLoopbackHost(h string) bool {
 	h = strings.TrimSpace(h)
@@ -194,6 +281,12 @@ func (c Config) Validate() error {
 	}
 	if c.LogMaxBackups < 0 || c.LogMaxBackups > 100 {
 		return fmt.Errorf("配置错误: log_max_backups 必须在 0-100 之间")
+	}
+	if len(c.Token) > 4096 {
+		return fmt.Errorf("配置错误: token 过长（最多 4096 字节）")
+	}
+	if strings.ContainsAny(c.Token, "\x00\r\n;") {
+		return fmt.Errorf("配置错误: token 不能包含 NUL、换行或分号")
 	}
 	// extra_keys 任意字符串均接受：未知符号按字面量文本发送。
 	return nil

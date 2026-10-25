@@ -38,7 +38,7 @@ jobs:
           name="onet-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
           mkdir -p "dist/$name" out
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME#v}" -o "dist/$name/onet${{ matrix.ext }}" .
-          cp config.example.json README.md "dist/$name/"
+          cp README.md "dist/$name/"
           if [ "${{ matrix.pkg }}" = "zip" ]; then
             (cd dist && zip -r "../out/$name.zip" "$name")
           else
