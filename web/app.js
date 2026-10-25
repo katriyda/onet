@@ -579,7 +579,10 @@ function syncViewport(smooth) {
     vpFrozenH = termHeight;
     const bottomIntent = bottomIntentWanted();
     vpForceBottom = bottomIntent;
-    vpPan = canAnchorBottom() || (bottomIntent && bufferFillsScreen());
+    // 全屏 TUI（alternate screen）绝不能平移：alt 缓冲没有回滚区，平移量无法在
+    // 提交后被 scrollToBottom 补偿，应用收到 SIGWINCH 又会整屏重绘回自己的视图，
+    // 结果就是“内容先上滑再被拉回”的滚动两下。只冻结行数，等应用重绘一次。
+    vpPan = !isAltBuffer() && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()));
     vpTarget = vpOffset = 0;
     termEl.style.height = vpFrozenH + 'px';
     if (vpPan) termEl.style.willChange = 'transform';
@@ -665,7 +668,8 @@ function commitViewport() {
     ' rows=' + term.rows +
     ' bottom=' + (atEnd ? 1 : 0) +
     ' force=' + (forced ? 1 : 0) +
-    ' pan=' + (panned ? 1 : 0));
+    ' pan=' + (panned ? 1 : 0) +
+    ' alt=' + (isAltBuffer() ? 1 : 0));
   // fit 之后 viewport/scroll-area 的同步是延后的，同一帧 scrollToBottom 会落在旧
   // scrollHeight 上（差 1–2 行）。统一走延后重试，尺寸稳定后只回到底部一次。
   if (atEnd) settleAnchorBottom();
