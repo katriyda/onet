@@ -96,3 +96,19 @@
 - 结果: 完成。`sh -n`/help/缺参退出 2 通过；容器内 `install.sh` 装出 0.3.1（校验无警告）、`-v v0.2.0` 走警告路径并装出 0.2.0；Windows 安装器装出 0.3.1；本地 Chromium 验证标题/6 个导航锚点/图片加载/复制到剪贴板/零 console 错误/仅同源请求，390×844 无横向溢出、导航可横滑；CI 与 Pages 均绿；线上 `https://katriyda.github.io/onet/` 校验通过，`install.ps1` 被 Pages 以 `application/octet-stream` 返回，Windows 命令改用 `raw.githubusercontent.com/.../install.ps1`（text/plain），重新部署后线上 `curl | sh` 与 `irm | iex` 均装出 0.3.1
 - meta: commit=93a41f2 files=docs/site/index.html,docs/site/style.css,docs/site/script.js,docs/site/favicon.svg,docs/site/install.sh,docs/site/install.ps1,docs/site/assets/desktop.png,docs/site/assets/mobile.png,.github/workflows/pages.yml,.github/workflows/release.yml,README.md,.agents/worklog.md
 
+## 2026-10-25 15:07 — 首次启动生成安全配置 + 网页设置/应用重启
+- session: s-20261025-configui
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 配置改为首次启动自动生成；默认安全（随机 token、仅本机监听）；网页可改配置、持久化，并能应用后重启
+- 做了什么:
+  - `config.go`：文件缺失时生成默认配置（`crypto/rand` 32 字节 RawURLEncoding token、host 127.0.0.1、allow_insecure=false）；`Save` 原子写（同目录临时文件 + rename、0600），配置目录内日志绝对路径自动转相对；token 长度/控制字符校验
+  - `main.go`：首次生成时 stderr+HUP 日志提示配置文件路径（不打印 token）；`app.start` 记录 config 路径；交接状态支持 `Rebind`
+  - `config_web.go`：`GET /config` 只回传 sanitized 配置 + `token_set`/`config_path`；`PUT /config` 要求 `X-Onet-Config: 1`，校验安全边界、原子保存、token 留空保持/`clear_token` 清除、可选交接重启；`configMu` 串行化写；重启前 400ms 刷响应
+  - `handoff*.go`：`handoffState.Rebind`；Unix 改监听地址时不复制旧 listener，关闭后 exec 由新进程 bind（失败恢复读循环+relisten），Windows 仍由子进程重新 bind；更新路径 rebind=false
+  - `web/`：新增设置面板（监听/认证/会话/界面/日志/安全全部字段），桌面浮层 + 移动全屏；随机令牌生成/清除、仅保存、保存并重启；重启后轮询新 origin 并跳转，端口变化自动改 URL；`app.js?v=20`、`style.css?v=11`
+  - 测试/文档：新增 `config_test.go`（首次生成、token 随机、隐藏 token、持久化、清 token、非法非回环、CSRF、重启冲突）、handoff Rebind 往返；删除 `config.example.json`，release 包不再带模板；更新 README/AGENTS/docs 站点
+- 产出: config.go、config_web.go、config_test.go、main.go、server.go、handoff.go、handoff_unix.go、handoff_test.go、update_web.go、update_test.go、web/{index.html,app.js,style.css}、README.md、AGENTS.md、docs/site/index.html、.github/workflows/release.yml
+- 结果: 完成。`go vet`、`go test`、Windows/Linux/darwin 构建通过；首次启动实测生成 43 字符 token 且 `/config` 未认证 401；Chromium 桌面/390×844 移动端设置面板；UI 改字号+改端口 8766→8770 保存并重启，`handoff.restored sessions=1`、旧端口关闭、新端口服务、会话保留；UI 轮换 token 后旧 token 401/新 token 200。提交 2386b87，CI 绿；tag v0.4.0 Release 8 资产；通过 `POST /update` 将 A 部署实例 0.3.1→0.4.0，`resumed=true`、1 个会话保留。注意：A 的既有 `config.json` 未改（仍 0.0.0.0 / 无 token / allow_insecure=true），安全默认只作用于新生成配置
+- meta: commit=2386b87 tag=v0.4.0 files=config.go,config_web.go,config_test.go,main.go,server.go,handoff.go,handoff_unix.go,handoff_test.go,update_web.go,update_test.go,web/index.html,web/app.js,web/style.css,README.md,AGENTS.md,docs/site/index.html,.github/workflows/release.yml,.agents/worklog.md
+
