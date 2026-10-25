@@ -480,7 +480,9 @@ window.addEventListener('resize', () => { if (cfg) applyMode(true); });
 // 现在：高度变化期间冻结 xterm 尺寸，直接把 #term 平移到新位置让底边贴住可视区
 // （不做缓动：键盘本身就是一次跳变，动画只会被看成“又滚了一下”）；
 // 尺寸稳定 VP_SETTLE_MS 后再一次性 fit + resize。行数没变 → 不动画。
-const VP_SETTLE_MS = 140;
+// 提交要早：键盘动画本身通常 200–300ms，提交（本地重排 + 80ms 后的 PTY resize +
+// 应用重绘）必须落在这段动画里，否则应用那次重绘会在键盘停稳之后单独“抽动一下”。
+const VP_SETTLE_MS = 60;
 const BOTTOM_INTENT_MS = 2000; // 触摸开始时在底部 → 这段时间内的视口变化仍锚底
 const coarsePointer = matchMedia('(pointer: coarse)');
 
@@ -490,6 +492,8 @@ let termHeight = 0;            // 最近一次布局后 #term 的高度
 let vpFrozenH = 0;             // 冻结期间 #term 的像素高度（0 = 未冻结）
 let vpPan = false;             // 是否把底边钉在可视区底部（缓冲区未填满时不钉）
 let vpSettleTimer = 0;
+let vpChanges = 0;             // 本次冻结内高度变了多少次（诊断：真机是否逐帧上报）
+let vpFirstChangeAt = 0;       // 本次冻结第一次高度变化的时刻
 let bottomIntentAt = 0;        // 用户最近一次在底部点击/聚焦的时间，0 = 无意图
 let vpForceBottom = false;     // 本次冻结是否来自“底部意图”
 let anchorSeq = 0;             // 取消延后锚定的令牌
@@ -573,6 +577,8 @@ function syncViewport(smooth) {
       return;
     }
     vpFrozenH = termHeight;
+    vpChanges = 0;
+    vpFirstChangeAt = 0;
     const bottomIntent = bottomIntentWanted();
     vpForceBottom = bottomIntent;
     // alt 缓冲（less/vim）没有回滚区（scrollHeight == clientHeight），平移量提交后
@@ -585,6 +591,10 @@ function syncViewport(smooth) {
       'h=' + vpFrozenH + ' pan=' + vpPan + ' intent=' + bottomIntent);
   }
 
+  if (h !== termHeight) {
+    if (!vpFirstChangeAt) vpFirstChangeAt = performance.now();
+    vpChanges++;
+  }
   if (h !== termHeight || !vpSettleTimer) {
     clearTimeout(vpSettleTimer);
     vpSettleTimer = setTimeout(commitViewport, VP_SETTLE_MS);
@@ -607,6 +617,8 @@ function endViewportFreeze() {
   vpFrozenH = 0;
   vpPan = false;
   vpForceBottom = false;
+  vpChanges = 0;
+  vpFirstChangeAt = 0;
   termEl.style.height = '';
   termEl.style.transform = '';
   termEl.style.willChange = '';
@@ -617,6 +629,8 @@ function commitViewport() {
   if (!vpFrozenH) return;
   const forced = vpForceBottom;
   const panned = vpPan;
+  const changes = vpChanges;
+  const settleDt = vpFirstChangeAt ? Math.round(performance.now() - vpFirstChangeAt) : 0;
   const atEnd = forced || bufferAtBottom();
   endViewportFreeze();
   lastFitKey = '';
@@ -635,7 +649,9 @@ function commitViewport() {
     ' bottom=' + (atEnd ? 1 : 0) +
     ' force=' + (forced ? 1 : 0) +
     ' pan=' + (panned ? 1 : 0) +
-    ' alt=' + (isAltBuffer() ? 1 : 0));
+    ' alt=' + (isAltBuffer() ? 1 : 0) +
+    ' n=' + changes +
+    ' dt=' + settleDt);
   // fit 之后 viewport/scroll-area 的同步是延后的，同一帧 scrollToBottom 会落在旧
   // scrollHeight 上（差 1–2 行）。统一走延后重试，尺寸稳定后只回到底部一次。
   if (atEnd) settleAnchorBottom();
@@ -660,7 +676,8 @@ function sendResize() {
 
 function scheduleResize() {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(sendResize, 80);
+  // 40ms：把 PTY resize（以及应用的重绘）压进键盘动画窗口里，别让它落在动画结束之后。
+  resizeTimer = setTimeout(sendResize, 40);
 }
 
 /* ---------------- 软键盘保持（点按界面不收起输入法） ---------------- */
