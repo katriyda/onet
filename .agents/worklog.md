@@ -208,4 +208,25 @@
 - meta: commit=0cd8541 tag=v0.5.5 files=web/app.js,web/index.html,README.md,AGENTS.md
 
 
+## 2026-10-25 17:48 — 键盘“抽动”：提交压进 IME 动画窗口 + 诊断字段
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户反馈“输入法弹出/关掉终端内容会抽动一下，之前版本一直都有”；把现象量化到最小可见变化次数
+- 做了什么:
+  - 换度量方式：先前用“相对 #term 顶部的固定偏移取文本”，平移时 term 顶本身也在动，导致误判“没变化”；改成**绝对屏幕 y**取文本（y=70/170/300），才量到真正的视觉位移
+  - 结论：键盘占掉的 290px 必须让内容上移，且应用收到 SIGWINCH 必须重绘——最少是“一次上移 + 一次应用重绘”两个事件。旧参数（`VP_SETTLE_MS=140` + resize 防抖 80ms）把应用重绘推到 ~220ms，落在键盘动画结束之后，于是被看成第二次抽动
+  - `web/app.js`：`VP_SETTLE_MS` 140→60，`scheduleResize` 80→40，让本地重排 + PTY resize + 应用重绘都落在系统键盘动画（200–300ms）内；`client.vp.settle` 增加 `n=`（本次冻结高度变化次数）与 `dt=`（首帧到提交的毫秒），用于判断真机是否逐帧上报、提交是否还在动画窗口内
+  - `app.js?v=32`；AGENTS 补该不变量与诊断字段说明
+- 产出: web/app.js、web/index.html、AGENTS.md；提交 9934eb9；tag/Release v0.5.6
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 + 现场会话实测（绝对 y 采样，15ms）：
+  - TUI 模拟器：t=0 内容 L93/L104/L119 → t=16ms 平移后 L125/L137/blank（一次上移）→ t=96ms 提交 rows 30，内容同上（提交不再引起位移）→ 之后仅应用自绘 spinner 行
+  - 现场 omp（7681，v32）：t=17ms transform `-290px` 一次到位；t=96ms rows 33→16，y70/y170/y300 文本**完全不变**（提交无位移）；t=143/175ms 仅状态栏 spinner 变化
+  - 普通输出 `pan=1`（`sc=1035=sh-ch`）、less `pan=0 alt=1` 无回归；日志均为 `n=1 dt≈62–74`
+  - 发布：CI/Release 绿（9 资产）；`POST /update` 0.5.5→0.5.6（`/healthz version=0.5.6,resumed=true`，页面引用 `app.js?v=32`）
+  - 待真机确认：刷新后看 `client.vp.settle ... n= dt=`：`n>1` = 手机逐帧上报（平移跟着键盘走）；`n=1` = 只报最终高度（只能一次性跳）
+- meta: commit=9934eb9 tag=v0.5.6 files=web/app.js,web/index.html,AGENTS.md
+
+
+
 
