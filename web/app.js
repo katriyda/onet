@@ -1057,12 +1057,33 @@ function startMomentum(velocity) {
 }
 
 /* ---------------- WS 协议 ---------------- */
-function rememberSession(id) {
-  lastSessionId = id || '';
+// 会话定位存 localStorage（跨刷新、新标签页、WebView 重启都保留），
+// sessionStorage 仅作隐私模式兜底。URL ?s= 仍是最高优先级。
+function readStoredSession() {
+  try {
+    const v = localStorage.getItem(LAST_SESSION_KEY);
+    if (v) return v;
+  } catch { /* localStorage 不可用 */ }
+  try {
+    return sessionStorage.getItem(LAST_SESSION_KEY) || '';
+  } catch { /* sessionStorage 也不可用 */ }
+  return '';
+}
+
+function writeStoredSession(id) {
+  try {
+    if (id) localStorage.setItem(LAST_SESSION_KEY, id);
+    else localStorage.removeItem(LAST_SESSION_KEY);
+  } catch { /* 隐私模式：仅内存变量可用 */ }
   try {
     if (id) sessionStorage.setItem(LAST_SESSION_KEY, id);
     else sessionStorage.removeItem(LAST_SESSION_KEY);
-  } catch { /* 隐私模式：仅内存变量可用 */ }
+  } catch { /* 同上 */ }
+}
+
+function rememberSession(id) {
+  lastSessionId = id || '';
+  writeStoredSession(lastSessionId);
   try {
     const url = new URL(location.href);
     if (id) url.searchParams.set('s', id);
@@ -1385,7 +1406,7 @@ function onSessions(list) {
 
   if (!sessions.length) {
     lastSessionId = '';
-    try { sessionStorage.removeItem(LAST_SESSION_KEY); } catch { /* noop */ }
+    writeStoredSession('');
   }
 
   placeholder.hidden = sessions.length > 0;
@@ -1396,9 +1417,7 @@ function onSessions(list) {
 function pickTarget() {
   const q = new URLSearchParams(location.search).get('s');
   let stored = lastSessionId;
-  if (!stored) {
-    try { stored = sessionStorage.getItem(LAST_SESSION_KEY) || ''; } catch { /* noop */ }
-  }
+  if (!stored) stored = readStoredSession();
   const match = (ident) => (ident ? sessions.find((s) => s.id === ident || s.name === ident) : null);
   const fromUrl = match(q);
   if (fromUrl && !fromUrl.dead) return fromUrl;

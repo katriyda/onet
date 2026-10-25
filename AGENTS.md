@@ -28,6 +28,7 @@
 - `modState` 键名小写；`dataset.key` 映射前先 `toLowerCase()`（历史 bug）
 - 布局跟 `visualViewport`，键盘弹起时重排并 resize；固定层（抽屉/底部菜单）用 `--vv-top`/`--vvh`，否则会被软键盘盖住
 - `/static/` 有 24h 缓存：改 `web/` 资源后递增 `index.html` 的 `?v=N`，否则真机/浏览器会继续跑旧 JS
+- 会话恢复顺序：URL `?s=` > `localStorage.onet_last_session` > `sessionStorage` 兜底。只在 `attached` 后写记录；Android WebView 刷新经常回退到 `/`（丢掉 `?s=`）且 `sessionStorage` 不跨实例，改用 localStorage 才能留在原会话，别改回只用 sessionStorage
 - 新增操作一律走统一的 `showMenu()`：移动端底部操作表、桌面锚定浮层，同一套图标/文案/危险色，别再造第二套菜单
 
 ## 热更新（自更新）
