@@ -165,3 +165,25 @@
   - 真机需强刷一次：TUI 会话里弹起/收起键盘应看到 `client.vp.settle ... alt=1 pan=0`
 - meta: commit=0a30b50 tag=v0.5.3 files=web/app.js,web/index.html,README.md,AGENTS.md
 
+
+## 2026-10-25 17:10 — 内联 TUI（omp）键盘动画不再平移
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: v0.5.3 后用户仍报“滚动两下”，指定会话是 omp（大量上下文）；定位并修掉 omp 场景
+- 做了什么:
+  - 现场取证：真机日志 `client.vp.settle` 缺 `alt=` 字段（16:53 起仍无）→ 手机页面还在跑 `app.js?v=28`；同时在 7681 会话上用 v29 实测 omp 为**普通缓冲**（`scrollHeight ≫ clientHeight`、`alt=0`、`pan=1`），`isAltBuffer()` 门控对 omp 完全不生效
+  - 影响面判断：alt 门控只覆盖 less/vim 这类 alt 缓冲；omp/htop 是“普通缓冲 + 绝对定位重绘”的内联 TUI，平移后会被自己按新行数重画回去 → 仍是“滑上去再拉回”
+  - `web/app.js` 新增 TUI 判定：`noteTermBytes()` 扫输出字节里的 `ESC[?25l` / `ESC[r;cH` / `ESC[r;cf` / 私有模式 `h`/`l`（含跨帧 12 字节回看），命中则记 `tuiPaintAt`；`tuiPaints()` = 最近 1.5s 有这类序列。`writeOutput()` 成为唯一写入入口（替换两处直接 `term.write(b64ToBytes(...))`）
+  - 冻结决策改为 `vpPan = !(isAltBuffer() || tuiPaints()) && (...)`，`client.vp.freeze` 增加 `tui=`；`app.js?v=30`；README/AGENTS 的不变量从“alt 不能平移”扩成“TUI 不能平移（alt + 内联 TUI）”
+- 产出: web/app.js、web/index.html、README.md、AGENTS.md；提交 279f693；tag/Release v0.5.4
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682（v30）：
+  - 内联 TUI 模拟器（底部状态条 + 每 100ms 绝对定位重绘）：710→420 共 169 帧 transform 恒空、冻结高 `562px`、rows 62→30，`freeze ... tui=true pan=false`、`settle pan=0 alt=0 bottom=1`；420→710 同样 `pan=0`
+  - 普通输出（`1..80 | % {"row $_"}`，atBottom）：transform 缓动帧齐全（-145…-290）、提交后 `sc=1035=sh-ch`，`freeze ... tui=false pan=true`、`settle pan=1 alt=0`
+  - alt 回归（less → G）：transform 恒空、顶行不变，`settle pan=0 alt=1`
+  - 现场 omp 会话（7681，v30 重载后）：90 帧 transform 恒空、冻结高 `562px`、rows 33→16，`settle vvh=420 pan=0 alt=0`、收起时 `vvh=710 pan=0`；截图对比：缩小时内容位置不变（仅底部被裁），提交后由 omp 自己重排一次
+  - 发布：CI/Release 绿（9 资产）；`POST /update` 0.5.3→0.5.4（`/healthz version=0.5.4,resumed=true`，页面引用 `app.js?v=30`）
+  - 真机仍需刷新页面（16:53 的日志证明手机仍在 v28）；刷新后 TUI 会话应为 `pan=0`（omp 也会带 `tui=true`）
+- meta: commit=279f693 tag=v0.5.4 files=web/app.js,web/index.html,README.md,AGENTS.md
+
+
