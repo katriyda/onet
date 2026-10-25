@@ -12,24 +12,37 @@ import (
 )
 
 const (
-	handoffStateVersion = 1
-	handoffStateEnv     = "ONET_HANDOFF_STATE"
-	handoffStateMax     = 32 << 20
+	// v2 起持久化 seq/ring/createdAt。旧二进制读到 v2 会拒绝并回滚，
+	// 避免降级时静默丢会话；新二进制仍能读 v1（Buffer 作为单帧恢复）。
+	handoffStateVersion    = 2
+	handoffStateVersionMin = 1
+	handoffStateEnv        = "ONET_HANDOFF_STATE"
+	handoffStateMax        = 32 << 20
 )
+
+// handoffFrame 是回放 ring 的可序列化形式；Data 按标准 base64 编码。
+type handoffFrame struct {
+	Seq  uint64 `json:"seq"`
+	Data []byte `json:"data"`
+}
 
 // handoffSession 是可跨进程传递的单个会话快照。
 // Handles 的含义由平台决定：Unix 为 master fd，Windows 为 ConPTY 句柄组。
 type handoffSession struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Cols     int      `json:"cols"`
-	Rows     int      `json:"rows"`
-	Dead     bool     `json:"dead"`
-	ExitCode int      `json:"exit_code"`
-	PID      int      `json:"pid"`
-	Started  int64    `json:"started"` // UnixNano
-	Buffer   []byte   `json:"buffer,omitempty"`
-	Handles  []uint64 `json:"handles,omitempty"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Cols        int            `json:"cols"`
+	Rows        int            `json:"rows"`
+	CreatedAt   int64          `json:"created_at"`
+	Seq         uint64         `json:"seq"`
+	Ring        []handoffFrame `json:"ring,omitempty"`
+	RingDropped bool           `json:"ring_dropped,omitempty"`
+	Dead        bool           `json:"dead"`
+	ExitCode    int            `json:"exit_code"`
+	PID         int            `json:"pid"`
+	Started     int64          `json:"started"`          // UnixNano
+	Buffer      []byte         `json:"buffer,omitempty"` // 旧版状态兼容：无 seq 的原始字节
+	Handles     []uint64       `json:"handles,omitempty"`
 }
 
 type handoffState struct {
@@ -77,7 +90,7 @@ func loadHandoffState(path string) (*handoffState, error) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("解析交接状态失败: %w", err)
 	}
-	if st.Version != handoffStateVersion {
+	if st.Version < handoffStateVersionMin || st.Version > handoffStateVersion {
 		return nil, fmt.Errorf("不支持的交接状态版本 %d", st.Version)
 	}
 	return &st, nil
@@ -102,19 +115,22 @@ func (s *Session) handoffSnapshot() handoffSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hs := handoffSession{
-		ID:       s.ID,
-		Name:     s.Name,
-		Cols:     s.cols,
-		Rows:     s.rows,
-		Dead:     s.dead,
-		ExitCode: s.exitCode,
+		ID:          s.ID,
+		Name:        s.Name,
+		Cols:        s.cols,
+		Rows:        s.rows,
+		CreatedAt:   s.createdAt,
+		Seq:         s.seq,
+		RingDropped: s.ringDropped,
+		Dead:        s.dead,
+		ExitCode:    s.exitCode,
+	}
+	for _, f := range s.ring {
+		hs.Ring = append(hs.Ring, handoffFrame{Seq: f.Seq, Data: f.Data})
 	}
 	if s.live != nil {
 		hs.PID = s.live.pty.Pid()
 		hs.Started = s.live.started.UnixNano()
-	}
-	if s.buf != nil {
-		hs.Buffer = s.buf.Bytes()
 	}
 	return hs
 }
@@ -183,6 +199,7 @@ func (m *Manager) RestoreHandoff(st *handoffState) error {
 	m.seq = st.Seq
 	m.mu.Unlock()
 
+	baseTime := time.Now().UnixMilli()
 	for i := range st.Sessions {
 		hs := st.Sessions[i]
 		cols, rows := hs.Cols, hs.Rows
@@ -193,11 +210,39 @@ func (m *Manager) RestoreHandoff(st *handoffState) error {
 			rows = 24
 		}
 		s := m.newSession(hs.ID, hs.Name, cols, rows)
+		// 旧版状态没有 createdAt：按原有顺序给每个会话一个递增时间戳。
+		if hs.CreatedAt > 0 {
+			s.createdAt = hs.CreatedAt
+		} else {
+			s.createdAt = baseTime + int64(i)
+		}
 		s.dead = hs.Dead
 		s.exitCode = hs.ExitCode
-		if len(hs.Buffer) > 0 {
-			s.buf.Write(hs.Buffer)
+		s.seq = hs.Seq
+		for _, f := range hs.Ring {
+			if f.Seq == 0 {
+				continue
+			}
+			data := append([]byte(nil), f.Data...)
+			s.ring = append(s.ring, outFrame{Seq: f.Seq, Data: data})
+			s.ringBytes += len(data)
+			if f.Seq > s.seq {
+				s.seq = f.Seq
+			}
 		}
+		s.ringDropped = hs.RingDropped
+		if len(s.ring) == 0 && len(hs.Buffer) > 0 {
+			// 旧版状态只有原始字节、没有帧序号：整体作为一帧，并标记历史不完整。
+			seq := hs.Seq
+			if seq == 0 {
+				seq = 1
+			}
+			s.seq = seq
+			s.ring = append(s.ring, outFrame{Seq: seq, Data: append([]byte(nil), hs.Buffer...)})
+			s.ringBytes = len(hs.Buffer)
+			s.ringDropped = true
+		}
+		s.trimRingLocked()
 
 		if len(hs.Handles) > 0 {
 			if hs.Dead {

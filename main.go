@@ -59,6 +59,11 @@ func runServer(configPath string) int {
 	closeLog := setupLogging(cfg)
 	defer closeLog()
 
+	if err := validateConfig(cfg); err != nil {
+		appLog.Error("app.start_refused", "err", err)
+		return 1
+	}
+
 	srv := NewServer(cfg)
 	mgr := NewManager(cfg, srv.broadcastSessions)
 	srv.mgr = mgr

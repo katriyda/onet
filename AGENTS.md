@@ -22,7 +22,7 @@
 - 长按/行选中用 `onPress()`；长按终端 = 选中整行，终端菜单在右上角 `⋯`，别再把长按改回弹菜单
 - **触屏手势必须挂在 `#touch-layer` 稳定层上**：xterm 6 的 DOM renderer 滚动时会 `replaceChildren` 替换行节点，直接监听 `.xterm`/行节点会在第一次 `touchmove` 后丢事件。不要给 `#touch-layer` 加 `pointer-events:none`
 - 普通缓冲区自己改 `viewport.scrollTop`（像素级 + 惯性）；**alternate screen / 鼠标上报时必须把拖拽翻译成 `WheelEvent`**，交给 xterm 转成 ↑/↓ 或 SGR wheel，否则 omp/less/vim 里拖不动
-- 服务端 attach 时先发重放 `output`、后发 `attached`：客户端用 `pendingAttach.id` 接收重放，否则首屏/切会话/刷新时输出会被丢掉；重连前先 `term.reset()` 防止 64KB 缓冲重放造成重复
+- 服务端 attach 时**先发 `attached`（带 seq/resumed/truncated/from_seq），再发回放 `output`**；客户端用 `hello.capabilities.attachOrder === "attached-first"` 判定，新协议按 `since_seq` 续传，旧服务端则把先到的 output 缓存进 `pendingAttach.early` 等 attached 后补写。重连前不再无条件 `term.reset()`：只有 `resumed=false` 或 `truncated=true` 才清屏，短断线保留滚动位置。改协议时同步维护 capability，否则回滚会重复写屏
 - `CHROME_SEL` 内的控件在捕获阶段 `pointerdown`+`mousedown` 阻止默认（iOS 必须 mousedown，WebKit bug 322721）以保持软键盘；新增"键盘弹起时会被点"的控件（菜单、选中条、滚动浮标、手势层）时加进去
 - 阻止默认后 `:active` 不可靠 → 反馈用 `.pressed` class
 - `modState` 键名小写；`dataset.key` 映射前先 `toLowerCase()`（历史 bug）
@@ -40,6 +40,8 @@
 - Windows：`HPCON` 是 `PseudoConsole*`，不是内核句柄，**不能 `DuplicateHandle`**。用 `ReadProcessMemory` 读内部 `hSignal`/`hPtyReference`/`hConPtyProcess`，逐个复制到子进程，再在子进程重建一个 `pseudoConsole` 结构作为 HPCON。`ClosePseudoConsole` 会 `HeapFree(HPCON)`，对 Go 分配的结构只能手动关三个句柄
 - Windows 监听 socket 与 IOCP 绑定，跨进程复制不可靠：父进程写最终状态后关闭 listener，子进程自己 `net.Listen`；失败时必须恢复旧 pump 并重新 `net.Listen`。握手是 stdin/stdout 的 `LOAD`/`READY`/`GO`/`SERVING`
 - 旧进程确认 `SERVING` 后才能断 WS 并退出；父进程正常退出路径**不能** `KillAll`。`main` 的 `handoffDone` 分支就是为此存在
+- Windows 新进程必须 `CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS`：否则 supervisor/job object 杀旧进程时会把新进程一起带走。受限 job 会拒绝 breakaway，`cmd.Start` 失败后按回滚路径继续用旧进程服务（日志 `app.handoff_spawn_failed` / `app.handoff_failed`）
+- `GET /healthz` 只对回环地址返回 `{status,version,resumed}`，供更新器确认新进程已监听；非回环 404，不暴露 token/会话
 - 更新失败发生在停读之后时，Windows 用 `conptyConn.RestartRead()`、Unix 用 dup fd 恢复；这是回滚可用性的关键，别删
 
 ## 验证（完成定义）

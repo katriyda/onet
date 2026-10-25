@@ -15,6 +15,7 @@ type updateCheckResp struct {
 	Latest    string `json:"latest"`
 	Asset     string `json:"asset,omitempty"`
 	Available bool   `json:"available"`
+	Updating  bool   `json:"updating"`
 }
 
 type updateInstallResp struct {
@@ -40,6 +41,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if s.updateInProgress() {
+		writeJSON(w, updateCheckResp{Current: version, Updating: true})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -58,6 +63,13 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	appLog.Info("update.check", "current", version, "latest", cand.Rel.Tag, "available", resp.Available)
 	writeJSON(w, resp)
+}
+
+// updateInProgress 返回是否有安装/切换正在执行（互斥读写 updating）。
+func (s *Server) updateInProgress() bool {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	return s.updating
 }
 
 func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {

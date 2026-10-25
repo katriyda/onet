@@ -11,6 +11,7 @@
   --accent: #35e07f;
   --accent-soft: rgba(53, 224, 127, 0.14);
   --ok: #35e07f;
+  --warning: #f5a623;
   --danger: #ff4d4f;
   --danger-soft: rgba(255, 77, 79, 0.12);
   --shadow: 6px 6px 0 rgba(0, 0, 0, 0.55);
@@ -56,6 +57,7 @@ button {
 
 button:focus { outline: none; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: 0.45; cursor: default; }
 
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
@@ -188,6 +190,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   min-width: 0;
   padding: 0;
 }
+.tab-main.pressed { background: var(--surface-3); }
 .tab-name {
   font-size: 13px;
   overflow: hidden;
@@ -235,6 +238,36 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   white-space: nowrap;
 }
 .banner-actions { display: flex; gap: 6px; flex: none; }
+
+/* 更新进度横幅：与退出横幅同结构，accent 色表示正常进行中 */
+#update-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-top: 1px solid rgba(53, 224, 127, 0.25);
+}
+#update-banner[data-kind="error"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-top-color: rgba(255, 107, 99, 0.25);
+}
+#update-banner[data-kind="warn"] {
+  color: var(--warning);
+  background: rgba(245, 166, 35, 0.12);
+  border-top-color: rgba(245, 166, 35, 0.25);
+}
+#update-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .btn {
   display: inline-flex;
@@ -695,6 +728,58 @@ body.mode-mobile #log-panel {
   border-right: 0;
 }
 
+/* ---------------- 手动粘贴面板（HTTP 局域网无剪贴板读权限时） ---------------- */
+#paste-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 145;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.55);
+}
+#paste-panel {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+#paste-input {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+  font: 13px/1.5 var(--font-ui);
+  resize: vertical;
+  user-select: text;
+  -webkit-user-select: text;
+}
+#paste-input:focus { outline: none; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.paste-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------------- 启动失败 ---------------- */
+#boot-error {
+  position: fixed;
+  inset: 0;
+  z-index: 180;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  background: var(--bg);
+  text-align: center;
+}
+#boot-error-text { color: var(--muted); font-size: 14px; max-width: 320px; }
+
 /* ---------------- 登录页 ---------------- */
 #login {
   position: fixed;
@@ -752,6 +837,9 @@ body.mode-mobile #log-panel {
   from { opacity: 0; transform: translate(-50%, -6px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
+#toast[data-kind="error"] { border-left-color: var(--danger); }
+#toast[data-kind="warn"] { border-left-color: var(--warning); }
+#toast[data-kind="success"] { border-left-color: var(--ok); }
 
 /* ---------------- 桌面断点（JS 加载前的兜底，避免闪烁） ---------------- */
 @media (min-width: 768px) and (pointer: fine) {
@@ -769,6 +857,17 @@ body.mode-desktop #drawer,
 body.mode-desktop #scrim,
 body.mode-desktop #touch-layer,
 body.mode-desktop #select-bar { display: none !important; }
+
+@media (hover: hover) {
+  .tab:not(.active):hover,
+  .session-row:hover:not(.active),
+  .menu-item:not(:disabled):hover,
+  .btn:hover,
+  .icon-btn:not(.active):hover { background: var(--surface-2); }
+  .tab-more:hover, .session-more:hover { color: var(--fg); }
+  .btn.primary:hover { background: #29c56e; }
+  .menu-item.danger:not(:disabled):hover { background: var(--danger-soft); }
+}
 
 @media (max-width: 360px) {
   .bar-title { font-size: 14px; }

@@ -26,10 +26,44 @@ let everConnected = false;
 let keysVisible = true;
 let reconnectDelay = 1000;
 let reconnectTimer = null;
+let stableTimer = null;
 let disconnected = false;
 let modState = { ctrl: 0, alt: 0 }; // 0=off 1=点按(仅下一次) 2=长按锁定
 let unseenOutput = false;
 let serverVersion = '';
+
+// 回放/续传协议
+const LAST_SESSION_KEY = 'onet_last_session';
+const SESSION_SEQ = new Map(); // session id -> 最后收到的 output seq
+let serverCaps = {};           // hello.capabilities；旧服务端为空对象
+let lastSessionId = '';
+let heartbeatTimer = null;
+let lastServerMessageAt = 0;
+let lastMissingTargetId = '';  // 避免同一缺失目标重复提示
+
+// 交互阈值（手势/长按/点按统一，别再各写一套）
+const LONG_PRESS_MS = 450;
+const TAP_SLOP = 10;
+const REPEAT_INTERVAL_MS = 80;
+const HEARTBEAT_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 25000;
+
+// 异步操作状态：失败/超时都要解锁，避免 UI 永久禁用
+let creating = false;
+let createTimer = null;
+let pendingRemoveId = null;
+let removingCurrent = false;
+let removeTimer = null;
+let restartingId = null;
+let restartTimer = null;
+let removing = false;
+
+// 更新状态机：idle → checking → installing → restarting → done/failed
+let updateState = 'idle';
+let pendingUpdateVersion = '';
+let updateBannerTimer = null;
+let updateVerifyTimer = null;
+let restartWatchdogTimer = null;
 
 let xtermViewport = null;
 let lastFitKey = '';
@@ -37,8 +71,13 @@ let resizeTimer = null;
 
 let menuOpen = false;
 let menuTimer = null;
+let menuTrigger = null;
 let drawerTimer = null;
+let drawerTrigger = null;
+let logTrigger = null;
 let toastTimer = null;
+let toastActiveKind = 'info';
+let toastUntil = 0;
 
 let selection = { active: false, anchor: 0, focus: 0 };
 let gesture = null;
@@ -65,6 +104,10 @@ const login = $('#login'), loginForm = $('#login-form'), loginErr = $('#login-er
 const toast = $('#toast');
 const logLayer = $('#log-layer'), logBody = $('#log-body'), logSub = $('#log-sub');
 const logTabClient = $('#log-tab-client'), logTabServer = $('#log-tab-server');
+const updateBanner = $('#update-banner'), updateText = $('#update-text');
+const bootError = $('#boot-error'), bootErrorText = $('#boot-error-text'), bootRetry = $('#boot-retry');
+const pasteLayer = $('#paste-layer'), pasteInput = $('#paste-input');
+const pasteOk = $('#paste-ok'), pasteCancel = $('#paste-cancel');
 
 /* ---------------- 日志：客户端采集 → WS 回传 → 服务端 JSONL ---------------- */
 // 浏览器侧事件/异常先入内存队列，WS 可用时按批回传；未发出的部分写入
@@ -208,19 +251,24 @@ function logClipboardError(operation, err) {
 }
 
 function installLogHooks() {
+  // 捕获阶段才能收到资源加载错误（error 事件不冒泡）。
   window.addEventListener('error', (ev) => {
-    // 资源加载失败（img/script）没有 Error 对象，target 是元素。
     if (ev.target && ev.target !== window && ev.target.tagName) {
       const t = ev.target;
       logEvent('error', 'client.error',
         'resource failed: ' + t.tagName.toLowerCase() + ' ' + (t.src || t.href || ''));
       return;
     }
+    if (ev.message === 'Script error.' && !ev.error) {
+      // 跨域脚本不暴露细节，按 warn 记录，避免污染错误统计。
+      logEvent('warn', 'client.error.opaque', ev.filename || '');
+      return;
+    }
     logEvent('error', 'client.error',
       (ev.message || 'unknown error') +
         (ev.filename ? ' (' + ev.filename + ':' + ev.lineno + ':' + ev.colno + ')' : ''),
       (ev.error && ev.error.stack) || '');
-  });
+  }, true);
 
   window.addEventListener('unhandledrejection', (ev) => {
     const r = ev.reason;
@@ -251,49 +299,90 @@ function installLogHooks() {
 }
 
 /* ---------------- 启动 ---------------- */
+// fetchWithTimeout 用 AbortController 覆盖旧 WebView（不支持 AbortSignal.timeout）。
+async function fetchWithTimeout(url, opts = {}, ms = 8000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function showBootError(message) {
+  if (!bootError) {
+    showToast(message, 4000, 'error');
+    return;
+  }
+  if (bootErrorText) bootErrorText.textContent = message;
+  bootError.hidden = false;
+  if (bootRetry) bootRetry.focus();
+}
+
 async function boot() {
   logEvent('info', 'client.boot',
     'href=' + safeLocation() + ' ua=' + navigator.userAgent + ' lang=' + navigator.language);
+  if (bootError) bootError.hidden = true;
 
   const qs = new URLSearchParams(location.search);
 
   // 深链带 ?token= → 自动登录并去掉 URL 中的 token
   if (qs.get('token')) {
-    const r = await fetch('/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: qs.get('token') }),
-    });
-    if (r.ok) {
-      logEvent('info', 'client.login.ok', 'via=deep_link');
-      qs.delete('token');
-      persistLogQueue(); // 刷新会丢掉内存队列，先落盘
-      location.replace(location.pathname + (qs.toString() ? '?' + qs : ''));
-      return;
+    try {
+      const r = await fetchWithTimeout('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: qs.get('token') }),
+      }, 10000);
+      if (r.ok) {
+        logEvent('info', 'client.login.ok', 'via=deep_link');
+        qs.delete('token');
+        persistLogQueue(); // 刷新会丢掉内存队列，先落盘
+        location.replace(location.pathname + (qs.toString() ? '?' + qs : ''));
+        return;
+      }
+      logEvent('warn', 'client.login.error', 'via=deep_link status=' + r.status);
+    } catch (err) {
+      logEvent('warn', 'client.login.error', 'via=deep_link err=' + ((err && err.message) || err));
     }
-    logEvent('warn', 'client.login.error', 'via=deep_link status=' + r.status);
   }
 
-  let resp;
+  // /config 可能撞上服务启动竞态：3 次重试（500/1000/2000ms），每次 8s 超时。
+  const waits = [500, 1000, 2000];
+  let resp = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      resp = await fetchWithTimeout('/config', { cache: 'no-store' }, 8000);
+      lastErr = null;
+      if (resp.status === 401) {
+        logEvent('info', 'client.config.unauthorized');
+        showLogin();
+        return;
+      }
+      if (resp.ok) break;
+      lastErr = new Error('HTTP ' + resp.status);
+    } catch (err) {
+      lastErr = err;
+      resp = null;
+    }
+    if (attempt < waits.length - 1) await new Promise((r) => setTimeout(r, waits[attempt]));
+  }
+  if (!resp || !resp.ok) {
+    const detail = lastErr ? ((lastErr && lastErr.message) || String(lastErr)) : 'unknown';
+    logEvent('error', 'client.config.fetch_failed', detail);
+    showBootError('无法连接服务器，请检查 onet 是否在运行');
+    return;
+  }
+
   try {
-    resp = await fetch('/config');
+    cfg = await resp.json();
   } catch (err) {
-    logEvent('error', 'client.config.fetch_failed', (err && err.message) || String(err));
-    showToast('无法连接服务器', 3000);
+    logEvent('error', 'client.config.parse_failed', (err && err.message) || String(err));
+    showBootError('配置解析失败，请刷新页面重试');
     return;
   }
-  if (resp.status === 401) {
-    logEvent('info', 'client.config.unauthorized');
-    showLogin();
-    return;
-  }
-  if (!resp.ok) {
-    logEvent('error', 'client.config.http_error', 'status=' + resp.status);
-    showToast('配置加载失败 (' + resp.status + ')', 3000);
-    return;
-  }
-
-  cfg = await resp.json();
   serverVersion = cfg.version || '';
   logEvent('info', 'client.config.loaded',
     'ui=' + cfg.ui + ' scrollback=' + cfg.scrollback + ' font_size=' + cfg.font_size +
@@ -303,37 +392,51 @@ async function boot() {
   connectWS();
 }
 
+let loginBound = false;
 function showLogin() {
+  clearUpdateBanner();
+  if (bootError) bootError.hidden = true;
+  if (!login) return;
   login.hidden = false;
-  loginForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    loginErr.hidden = true;
-    const r = await fetch('/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: $('#login-token').value }),
-    });
-    if (r.ok) {
-      logEvent('info', 'client.login.ok', 'via=form');
-      persistLogQueue(); // reload 前落盘，登录后继续回传
-      location.reload();
-    } else {
-      logEvent('warn', 'client.login.error', 'via=form status=' + r.status);
-      loginErr.textContent = '令牌错误';
+  if (!loginBound) {
+    loginBound = true;
+    loginForm.onsubmit = async (e) => {
+      e.preventDefault();
+      loginErr.hidden = true;
+      try {
+        const r = await fetchWithTimeout('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: $('#login-token').value }),
+        }, 10000);
+        if (r.ok) {
+          logEvent('info', 'client.login.ok', 'via=form');
+          persistLogQueue(); // reload 前落盘，登录后继续回传
+          location.reload();
+          return;
+        }
+        logEvent('warn', 'client.login.error', 'via=form status=' + r.status);
+        loginErr.textContent = '令牌错误';
+      } catch (err) {
+        logEvent('warn', 'client.login.error', 'via=form err=' + ((err && err.message) || err));
+        loginErr.textContent = '无法连接服务器';
+      }
       loginErr.hidden = false;
-    }
-  });
-  setTimeout(() => $('#login-token').focus(), 50);
+    };
+  }
+  setTimeout(() => { const el = $('#login-token'); if (el) el.focus(); }, 50);
 }
 
 /* ---------------- 模式判定 ---------------- */
 function detectMode() {
+  if (!cfg) return mode;
   if (cfg.ui === 'mobile' || cfg.ui === 'desktop') return cfg.ui;
   const fineWide = matchMedia('(pointer: fine)').matches && matchMedia('(min-width: 768px)').matches;
   return fineWide ? 'desktop' : 'mobile';
 }
 
 function applyMode() {
+  if (!cfg) return;
   const next = detectMode();
   const changed = next !== mode;
   mode = next;
@@ -342,24 +445,25 @@ function applyMode() {
 
   if (changed) {
     // 没有显式偏好时跟随模式：移动端默认显示按键栏，桌面端默认隐藏
-    const pref = localStorage.getItem('onet_keys');
+    let pref = null;
+    try { pref = localStorage.getItem('onet_keys'); } catch { /* noop */ }
     keysVisible = pref === '1' ? true : pref === '0' ? false : mode === 'mobile';
     if (term) renderKeys();
   }
   updateKeysVisibility();
-  layout();
+  scheduleLayout();
 }
 
 function updateKeysVisibility() {
   const show = !!(keysVisible && term);
   keysBar.classList.toggle('show', show);
   dKeysBtn.classList.toggle('active', keysVisible);
-  layout();
+  scheduleLayout();
 }
 
 matchMedia('(pointer: coarse)').addEventListener('change', applyMode);
 matchMedia('(pointer: fine)').addEventListener('change', applyMode);
-window.addEventListener('resize', () => { applyMode(); });
+window.addEventListener('resize', () => { if (cfg) applyMode(); });
 
 /* ---------------- 布局 / 尺寸 ---------------- */
 let layoutRaf = 0;
@@ -432,11 +536,12 @@ document.addEventListener('pointerdown', keepKeyboard, { capture: true });
 document.addEventListener('mousedown', keepKeyboard, { capture: true });
 
 // 界面动作统一走 pointer 事件（阻止默认后 click 在触屏上未必派发）。
-// 滑动超过 10px（滚动/拖拽）不算点按；鼠标划出元素取消；键盘 Enter/Space 的 click（detail === 0）保留。
+// 滑动超过 TAP_SLOP 不算点按；鼠标划出元素取消；键盘 Enter/Space 的 click（detail === 0）保留。
 let lastTapAt = 0;
 function onTap(el, fn) {
   let down = null;
   el.addEventListener('pointerdown', (ev) => {
+    if (el.disabled) return;
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     down = { x: ev.clientX, y: ev.clientY };
     el.classList.add('pressed');
@@ -445,7 +550,7 @@ function onTap(el, fn) {
     el.classList.remove('pressed');
     const start = down;
     down = null;
-    if (!start || Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10) return;
+    if (el.disabled || !start || Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > TAP_SLOP) return;
     lastTapAt = performance.now();
     fn(ev);
   });
@@ -456,6 +561,7 @@ function onTap(el, fn) {
     el.classList.remove('pressed');
   });
   el.addEventListener('click', (ev) => {
+    if (el.disabled) return;
     if (ev.detail === 0 && performance.now() - lastTapAt > 700) fn(ev);
   });
 }
@@ -469,6 +575,7 @@ function onPress(el, opts = {}) {
     el.classList.remove('pressed');
   };
   el.addEventListener('pointerdown', (ev) => {
+    if (el.disabled) return;
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     down = { x: ev.clientX, y: ev.clientY };
     longDone = false;
@@ -476,16 +583,16 @@ function onPress(el, opts = {}) {
     if (opts.longPress) {
       timer = setTimeout(() => {
         timer = null;
-        if (!down) return;
+        if (!down || el.disabled) return;
         longDone = true;
         el.classList.remove('pressed');
         opts.longPress({ clientX: down.x, clientY: down.y });
-      }, opts.delay || 480);
+      }, opts.delay || LONG_PRESS_MS);
     }
   });
   el.addEventListener('pointermove', (ev) => {
     if (!down) return;
-    if (Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 10) cancel();
+    if (Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > TAP_SLOP) cancel();
   });
   el.addEventListener('pointerup', (ev) => {
     if (!down) { el.classList.remove('pressed'); return; }
@@ -495,14 +602,15 @@ function onPress(el, opts = {}) {
     timer = null;
     down = null;
     el.classList.remove('pressed');
-    if (wasLong) return;
-    if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10) return;
+    if (el.disabled || wasLong) return;
+    if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > TAP_SLOP) return;
     lastTapAt = performance.now();
     if (opts.tap) opts.tap(ev);
   });
   el.addEventListener('pointercancel', cancel);
   el.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') cancel(); });
   el.addEventListener('click', (ev) => {
+    if (el.disabled) return;
     if (ev.detail === 0 && !longDone && performance.now() - lastTapAt > 700 && opts.tap) opts.tap(ev);
   });
 }
@@ -514,6 +622,12 @@ function storedFontSize() {
 }
 
 function initTerm() {
+  if (!window.Terminal || !window.FitAddon || !window.FitAddon.FitAddon) {
+    logEvent('error', 'client.term.missing',
+      'Terminal=' + !!window.Terminal + ' FitAddon=' + !!window.FitAddon);
+    showBootError('终端组件加载失败，请刷新页面');
+    return;
+  }
   term = new window.Terminal({
     fontSize: storedFontSize(),
     scrollback: cfg.scrollback || 5000,
@@ -694,11 +808,11 @@ function autoScrollSelection(clientY) {
 function copySelection() {
   if (!term) return;
   const text = term.getSelection();
-  if (!text) { showToast('没有可复制的内容'); return; }
+  if (!text) { showToast('没有可复制的内容', 3000, 'warn'); return; }
   const count = Math.abs(selection.focus - selection.anchor) + 1;
   writeClipboard(text)
-    .then(() => { showToast('已复制 ' + count + ' 行'); clearSelection(); })
-    .catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败'); });
+    .then(() => { showToast('已复制 ' + count + ' 行', 1800, 'success'); clearSelection(); })
+    .catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败', 5000, 'error'); });
 }
 
 function selectAllBuffer() {
@@ -709,7 +823,6 @@ function selectAllBuffer() {
 }
 
 /* ---------------- 触屏手势（稳定层，避免 xterm 行节点替换导致丢事件） ---------------- */
-const LONG_PRESS_MS = 420;
 const EDGE_OPEN_PX = 22;
 
 function touchDist(touches) {
@@ -808,7 +921,7 @@ function onTouchMove(e) {
     return;
   }
 
-  if (!gesture.moved && Math.hypot(dx, dy) > 6) {
+  if (!gesture.moved && Math.hypot(dx, dy) > TAP_SLOP) {
     gesture.moved = true;
     cancelLongPress();
   }
@@ -944,13 +1057,48 @@ function startMomentum(velocity) {
 }
 
 /* ---------------- WS 协议 ---------------- */
+function rememberSession(id) {
+  lastSessionId = id || '';
+  try {
+    if (id) sessionStorage.setItem(LAST_SESSION_KEY, id);
+    else sessionStorage.removeItem(LAST_SESSION_KEY);
+  } catch { /* 隐私模式：仅内存变量可用 */ }
+  try {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set('s', id);
+    else url.searchParams.delete('s');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  } catch { /* file:// 等环境不支持 */ }
+}
+
 function sendCmd(obj) {
-  if (obj && obj.type !== 'resize') {
+  if (obj && obj.type !== 'resize' && obj.type !== 'ping') {
     logEvent('debug', 'client.cmd', 'type=' + obj.type + (obj.id ? ' id=' + obj.id : ''));
   }
   if (ws && ws.readyState === 1) {
     ws.send(new TextEncoder().encode(JSON.stringify(obj))); // 二进制帧 = JSON 命令
   }
+}
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  if (serverCaps.ping !== true) return;
+  lastServerMessageAt = Date.now();
+  heartbeatTimer = setInterval(() => {
+    if (!ws || ws.readyState !== 1) return;
+    // 服务端 20s 无任何帧（含 pong/list/output）视为假连接，主动重连。
+    if (Date.now() - lastServerMessageAt > HEARTBEAT_TIMEOUT_MS) {
+      logEvent('warn', 'client.ws.stale', 'idle_ms=' + (Date.now() - lastServerMessageAt));
+      ws.close();
+      return;
+    }
+    sendCmd({ type: 'ping' });
+  }, HEARTBEAT_MS);
 }
 
 function connectWS() {
@@ -963,22 +1111,19 @@ function connectWS() {
   ws.onopen = () => {
     const reconnected = everConnected;
     everConnected = true;
-    reconnectDelay = 1000;
     booting = true;
+    // 能力必须按新连接重置：回滚到旧服务端后不能继续发送 since_seq / 心跳。
+    serverCaps = {};
+    stopHeartbeat();
+    clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => { reconnectDelay = 1000; }, 5000);
     logEvent('info', 'client.ws.open', 'reconnected=' + reconnected + ' href=' + safeLocation());
-    if (reconnected && term) {
-      // 断线重连：服务端会重放 64KB 缓冲，先清屏避免内容重复
-      current = null;
-      pendingAttach = null;
-      term.reset();
-      clearSelection();
-      unseenOutput = false;
-      updateScrollPill();
-    }
     if (disconnected) {
       disconnected = false;
-      showToast('已重连', 1200);
+      showToast('已重连', 1800, 'success');
     }
+    // 重连不在本地清屏：由 attached 的 resumed/resumed=false 决定是否重置，
+    // 这样短断线可以续传原会话与滚动位置。
     sendCmd({ type: 'list' });
   };
   ws.onmessage = (ev) => {
@@ -989,18 +1134,19 @@ function connectWS() {
     logEvent('warn', 'client.ws.close',
       'code=' + ev.code + ' reason=' + (ev.reason || '') + ' wasClean=' + ev.wasClean +
         ' next_delay_ms=' + reconnectDelay);
-    current = null;
-    pendingAttach = null;
+    stopHeartbeat();
+    clearTimeout(stableTimer);
     clearSelection();
     updateStatus();
-    setExitBanner(null);
     renderSessions();
     if (!disconnected) {
       disconnected = true;
-      showToast('连接断开，重连中…', 2200);
+      showToast('连接断开，重连中…', 2200, 'warn');
     }
+    if (updateState === 'restarting') startRestartWatchdog();
     clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectWS, reconnectDelay);
+    // 抖动避免多个页面同时重连；退避只在连接稳定 5s 后才重置。
+    reconnectTimer = setTimeout(connectWS, reconnectDelay * (0.8 + Math.random() * 0.4));
     reconnectDelay = Math.min(reconnectDelay * 2, 10000);
   };
   ws.onerror = () => {
@@ -1019,89 +1165,159 @@ function b64ToBytes(b64) {
 function handleMsg(buf) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(buf)); } catch { return; }
+  lastServerMessageAt = Date.now();
   switch (msg.type) {
     case 'hello':
       serverConnId = msg.conn || '';
-      logEvent('info', 'client.hello', 'conn=' + serverConnId + ' version=' + (msg.version || ''));
-      if (msg.version) {
-        if (serverVersion && msg.version !== serverVersion) {
-          showToast('已更新到 ' + versionLabel(msg.version), 3500);
-        }
-        serverVersion = msg.version;
-      }
+      serverCaps = msg.capabilities || {};
+      logEvent('info', 'client.hello',
+        'conn=' + serverConnId + ' version=' + (msg.version || '') +
+        ' caps=' + JSON.stringify(serverCaps));
+      startHeartbeat();
+      if (msg.version) handleHelloVersion(msg.version);
       break;
     case 'notice':
-      logEvent(msg.level === 'error' ? 'error' : 'info', 'client.notice', msg.message || '');
-      showToast(msg.message || '服务端提示', 4000);
+      logEvent(msg.level === 'error' ? 'error' : 'warn', 'client.notice', msg.message || '');
+      if (msg.level === 'error' && updateState === 'restarting') {
+        // 服务端交接失败时不会断开 WS，必须由 notice 结束“正在切换进程”。
+        updateState = 'failed';
+        pendingUpdateVersion = '';
+        clearTimeout(restartWatchdogTimer);
+        restartWatchdogTimer = null;
+        showUpdateBanner(msg.message || '更新失败', 'error');
+        setTimeout(() => { if (updateState === 'failed') updateState = 'idle'; }, 5000);
+      }
+      showToast(msg.message || '服务端提示', msg.level === 'error' ? 5000 : 4000,
+        msg.level === 'error' ? 'error' : 'warn');
       break;
     case 'output': {
-      const id = current ? current.id : (pendingAttach && pendingAttach.id);
-      if (id && msg.id === id && term) {
-        if (!atBottom()) unseenOutput = true;
-        term.write(b64ToBytes(msg.data), () => updateScrollPill());
+      // 兼容旧服务端“先 output 后 attached”：先缓存，等 attached 决定如何写入。
+      if (pendingAttach) {
+        // 切换会话时旧会话的尾帧可能还在路上，不能混进新终端。
+        if (msg.id !== pendingAttach.id) return;
+        const p = pendingAttach;
+        p.early.push(msg);
+        p.earlyBytes = (p.earlyBytes || 0) + (msg.data ? msg.data.length : 0);
+        if (p.early.length > 256 || p.earlyBytes > 8 * 1024 * 1024) {
+          logEvent('warn', 'client.attach.early_overflow', 'id=' + p.id + ' frames=' + p.early.length);
+          attachTo(p.id, { resume: false });
+        }
+        return;
       }
+      const id = current && current.id;
+      if (!id || msg.id !== id || !term) return;
+      if (typeof msg.seq === 'number') {
+        const prev = SESSION_SEQ.get(msg.id);
+        if (prev != null) {
+          if (msg.seq <= prev) return; // 重复帧（重连/重放重叠）
+          if (msg.seq !== prev + 1) {
+            logEvent('warn', 'client.output.gap', 'from=' + prev + ' to=' + msg.seq);
+            showToast('输出丢失，正在重新同步…', 3000, 'warn');
+            attachTo(id, { resume: false });
+            return;
+          }
+        }
+        SESSION_SEQ.set(msg.id, msg.seq);
+      }
+      if (!atBottom()) unseenOutput = true;
+      term.write(b64ToBytes(msg.data), () => updateScrollPill());
       break;
     }
     case 'exit':
       logEvent('warn', 'client.session.exit', 'id=' + msg.id + ' code=' + msg.code);
-      showToast('会话 ' + msg.id + ' 已退出 (code ' + msg.code + ')', 2000);
+      showToast('会话 ' + msg.id + ' ' + (msg.code ? '已退出 · code ' + msg.code : '已退出'), 2500, 'warn');
       break;
     case 'sessions':
       logEvent('debug', 'client.sessions', 'count=' + (Array.isArray(msg.sessions) ? msg.sessions.length : 0));
       onSessions(msg.sessions);
       break;
-    case 'attached':
-      if (pendingAttach && pendingAttach.id !== msg.id) break; // 忽略过期的 attach 响应
-      logEvent('info', 'client.attach.ok', 'id=' + msg.id);
+    case 'attached': {
+      if (!pendingAttach || pendingAttach.id !== msg.id) break; // 忽略过期的 attach 响应
+      const early = pendingAttach.early;
+      const wasAtBottom = pendingAttach.wasAtBottom;
+      const attachedFirst = serverCaps.attachOrder === 'attached-first';
       pendingAttach = null;
-      current = {
-        id: msg.id,
-        name: findSession(msg.id) ? (findSession(msg.id).name || findSession(msg.id).id) : msg.id,
-      };
+      logEvent('info', 'client.attach.ok',
+        'id=' + msg.id + ' resumed=' + !!msg.resumed + ' truncated=' + !!msg.truncated +
+        ' seq=' + msg.seq);
+      const s = findSession(msg.id);
+      current = { id: msg.id, name: s ? (s.name || s.id) : msg.id };
+      if (msg.truncated) {
+        // 历史已截断：清屏 + 分隔线，避免把半行旧输出当新输出。
+        SESSION_SEQ.delete(msg.id);
+        if (term) { term.reset(); term.write('\r\n\x1b[0m'); }
+        early.length = 0;
+        showToast('连接中断，历史已截断', 5000, 'warn');
+      } else if (!msg.resumed) {
+        // 服务端做了完整重放（或旧服务端）：序号可能从头开始，必须丢弃旧 seq。
+        SESSION_SEQ.delete(msg.id);
+        if (term) term.reset();
+      }
+      if (!attachedFirst) {
+        // 旧服务端在 attached 之前发了 output；按到达顺序补写。
+        for (const m of early) {
+          if (term && m.data) term.write(b64ToBytes(m.data), () => updateScrollPill());
+          if (typeof m.seq === 'number') SESSION_SEQ.set(msg.id, m.seq);
+        }
+      }
+      early.length = 0;
       placeholder.hidden = true;
-      clearSelection();
-      unseenOutput = false;
+      if (!msg.truncated && !msg.resumed) unseenOutput = false;
+      rememberSession(msg.id);
       updateStatus();
       renderSessions();
-      fitTerm(true);
+      if (term) fitTerm(true);
       scheduleResize();
       setTimeout(() => {
         if (current && current.id === msg.id) {
-          scrollToBottom();
+          if (wasAtBottom) scrollToBottom();
           updateScrollPill();
         }
       }, 40);
       break;
-    case 'created':
+    }
+    case 'created': {
+      const wasAuto = autoCreating;
+      autoCreating = false;
       logEvent('info', 'client.session.created', 'id=' + msg.id);
-      attachTo(msg.id);
+      clearCreateGuard();
+      if (wasAuto) showToast('服务器没有会话，已新建', 3000, 'info');
+      if (current && current.id === msg.id) break;
+      attachTo(msg.id, { resume: false });
       break;
+    }
     case 'detached':
-      logEvent('info', 'client.session.detached');
-      current = null;
-      pendingAttach = null;
-      placeholder.hidden = false;
-      clearSelection();
+      logEvent('info', 'client.session.detached', 'id=' + (msg.id || ''));
+      // 旧会话的 detach 不能清掉正在进行的 attach。
+      if (msg.id) {
+        if (pendingAttach && pendingAttach.id === msg.id) pendingAttach = null;
+        if (!current || current.id === msg.id) current = null;
+      } else {
+        current = null;
+        pendingAttach = null;
+      }
       updateStatus();
       renderSessions();
       break;
     case 'error':
       logEvent('warn', 'client.error_reply', msg.message);
-      if (booting && /已退出|不存在/.test(msg.message)) {
-        booting = false;
+      clearCreateGuard();
+      if (pendingRemoveId) { clearRemoveGuard(); removingCurrent = false; }
+      if (restartingId) clearRestartGuard();
+      if (pendingAttach) {
         pendingAttach = null;
-        sendCmd({ type: 'create', name: '' });
-      } else {
-        if (pendingAttach) {
-          pendingAttach = null;
-          const target = pickTarget();
-          if (target) attachTo(target.id);
-          else placeholder.hidden = false;
-          updateStatus();
-          renderSessions();
+        if (booting && /已退出|不存在/.test(msg.message)) {
+          booting = false;
+          createSession({ auto: true });
+          return;
         }
-        showToast(msg.message, 2500);
+        const target = pickTarget();
+        if (target) attachTo(target.id, { resume: false });
+        else placeholder.hidden = false;
+        updateStatus();
+        renderSessions();
       }
+      showToast(msg.message, 3500, 'warn');
       break;
   }
 }
@@ -1112,13 +1328,14 @@ function findSession(id) {
 
 function onSessions(list) {
   sessions = Array.isArray(list) ? list : [];
+  let cur = current && findSession(current.id);
   renderSessions();
 
   if (booting) {
     booting = false;
     const target = pickTarget();
-    if (target) attachTo(target.id);
-    else sendCmd({ type: 'create', name: '' });
+    if (target) attachTo(target.id, { resume: !!SESSION_SEQ.get(target.id) });
+    else createSession({ auto: true });
     return;
   }
 
@@ -1127,61 +1344,172 @@ function onSessions(list) {
     return;
   }
 
-  const cur = current && findSession(current.id);
-  if (!cur) {
-    const hadCurrent = !!current;
-    current = null;
-    clearSelection();
-    if (hadCurrent) {
-      // 当前会话被移除：自动切到最近的存活会话，避免停在空白页
-      const target = pickTarget();
-      if (target) attachTo(target.id);
-      else placeholder.hidden = false;
-    } else if (!sessions.length) {
-      placeholder.hidden = true;
-      createSession();
+  // 重启完成：当前会话需要重新 attach；其他会话只提示。
+  if (restartingId) {
+    const rs = findSession(restartingId);
+    if (rs && !rs.dead) {
+      const wasCurrent = current && current.id === restartingId;
+      clearRestartGuard();
+      if (wasCurrent) {
+        attachTo(restartingId, { resume: false });
+        return;
+      }
+      showToast('会话已重启', 2500, 'success');
     }
-    updateStatus();
-    setExitBanner(null);
-  } else {
-    updateStatus();
-    setExitBanner(cur.dead ? cur : null);
   }
+
+  if (current && cur && cur.dead) {
+    // 当前会话退出：保留在页面上，显示退出横幅与重启入口，不自动切走。
+  } else if (current && !cur) {
+    current = null;
+    cur = null;
+    clearSelection();
+    const target = pickTarget();
+    if (target) {
+      attachTo(target.id, { resume: false });
+    } else if (sessions.length) {
+      createSession({ auto: true });
+    } else {
+      placeholder.hidden = false;
+    }
+  } else if (!current) {
+    const target = pickTarget();
+    if (target) attachTo(target.id, { resume: false });
+  }
+
+  if (removingCurrent && pendingRemoveId && !findSession(pendingRemoveId)) {
+    showToast(sessions.length ? '当前会话已删除，已切换' : '当前会话已删除', 3000, 'warn');
+    removingCurrent = false;
+  }
+  if (pendingRemoveId && !findSession(pendingRemoveId)) clearRemoveGuard();
+
+  if (!sessions.length) {
+    lastSessionId = '';
+    try { sessionStorage.removeItem(LAST_SESSION_KEY); } catch { /* noop */ }
+  }
+
+  placeholder.hidden = sessions.length > 0;
+  updateStatus();
+  setExitBanner(cur && cur.dead ? cur : null);
 }
 
 function pickTarget() {
   const q = new URLSearchParams(location.search).get('s');
-  if (q) {
-    const m = sessions.find((s) => s.id === q || s.name === q);
-    if (m && !m.dead) return m;
+  let stored = lastSessionId;
+  if (!stored) {
+    try { stored = sessionStorage.getItem(LAST_SESSION_KEY) || ''; } catch { /* noop */ }
   }
-  for (let i = sessions.length - 1; i >= 0; i--) {
-    if (!sessions[i].dead) return sessions[i];
+  const match = (ident) => (ident ? sessions.find((s) => s.id === ident || s.name === ident) : null);
+  const fromUrl = match(q);
+  if (fromUrl && !fromUrl.dead) return fromUrl;
+  const fromStore = match(stored);
+  if (fromStore && !fromStore.dead) return fromStore;
+
+  const missing = q || stored;
+  if (missing && missing !== lastMissingTargetId) {
+    lastMissingTargetId = missing;
+    showToast('指定的会话不存在或已退出，已切换到最近会话', 3000, 'warn');
   }
-  return null;
+
+  // createdAt 最大者；旧服务端没有该字段时退回列表最后一个存活会话。
+  let best = null;
+  for (const s of sessions) {
+    if (s.dead) continue;
+    if (!best) { best = s; continue; }
+    const a = typeof s.createdAt === 'number' ? s.createdAt : Number.NEGATIVE_INFINITY;
+    const b = typeof best.createdAt === 'number' ? best.createdAt : Number.NEGATIVE_INFINITY;
+    if (a >= b) best = s;
+  }
+  return best;
 }
 
 /* ---------------- 会话操作 ---------------- */
-function createSession() {
-  logEvent('info', 'client.session.create');
-  sendCmd({ type: 'create', name: '' });
+const NEW_BUTTONS = ['#m-new-btn', '#d-new-btn', '#ph-new', '#drawer-new'];
+
+function setNewButtonsDisabled(disabled) {
+  for (const sel of NEW_BUTTONS) {
+    const el = $(sel);
+    if (el) el.disabled = disabled;
+  }
 }
 
-function attachTo(id) {
+function clearCreateGuard() {
+  creating = false;
+  autoCreating = false;
+  clearTimeout(createTimer);
+  createTimer = null;
+  setNewButtonsDisabled(false);
+}
+
+function clearRemoveGuard() {
+  removing = false;
+  pendingRemoveId = null;
+  clearTimeout(removeTimer);
+  removeTimer = null;
+}
+
+function clearRestartGuard() {
+  restartingId = null;
+  clearTimeout(restartTimer);
+  restartTimer = null;
+}
+
+function createSession({ auto = false } = {}) {
+  if (creating) return;
+  if (!ws || ws.readyState !== 1) {
+    showToast('连接已断开，无法新建', 3000, 'warn');
+    return;
+  }
+  logEvent('info', 'client.session.create', 'auto=' + auto);
+  creating = true;
+  autoCreating = auto;
+  setNewButtonsDisabled(true);
+  sendCmd({ type: 'create', name: '', cols: term ? term.cols : 0, rows: term ? term.rows : 0 });
+  clearTimeout(createTimer);
+  createTimer = setTimeout(() => {
+    if (!creating) return;
+    clearCreateGuard();
+    showToast('新建会话超时，请重试', 4000, 'error');
+  }, 5000);
+}
+let autoCreating = false;
+
+function attachTo(id, { resume = false } = {}) {
   if (!term) return;
-  logEvent('info', 'client.attach.request', 'id=' + id);
+  if (!ws || ws.readyState !== 1) {
+    showToast('连接已断开，请稍候', 3000, 'warn');
+    return;
+  }
+  const attachedFirst = serverCaps.attachOrder === 'attached-first';
+  // 只有新服务端 + 本地确实有该会话序号时才续传；否则完整重放。
+  const canResume = !!(resume && attachedFirst && SESSION_SEQ.has(id));
+  const wasAtBottom = atBottom();
+  logEvent('info', 'client.attach.request', 'id=' + id + ' resume=' + canResume);
   cancelMomentum();
   cancelLongPress();
   gesture = null;
-  pendingAttach = { id };
+  pendingAttach = {
+    id,
+    resume: canResume,
+    sinceSeq: canResume ? SESSION_SEQ.get(id) : undefined,
+    early: [],
+    earlyBytes: 0,
+    wasAtBottom,
+  };
   current = null;
-  term.reset();
-  clearSelection();
-  unseenOutput = false;
+  if (!canResume) {
+    term.reset();
+    clearSelection();
+    unseenOutput = false;
+    // 完整重放的新序号可能小于旧值，旧 seq 必须丢弃，否则会被当成重复帧。
+    SESSION_SEQ.delete(id);
+  }
   placeholder.hidden = true;
   updateStatus();
   updateScrollPill();
-  sendCmd({ type: 'attach', id });
+  const cmd = { type: 'attach', id, cols: term.cols, rows: term.rows };
+  if (canResume) cmd.since_seq = pendingAttach.sinceSeq;
+  sendCmd(cmd);
   if (mode === 'desktop' && term) term.focus();
 }
 
@@ -1194,7 +1522,9 @@ function switchTo(s) {
 }
 
 function restartSession(id) {
+  if (restartingId) return;
   logEvent('info', 'client.session.restart', 'id=' + id);
+  restartingId = id;
   if (current && current.id === id && term) {
     term.reset();
     clearSelection();
@@ -1203,23 +1533,48 @@ function restartSession(id) {
   }
   sendCmd({ type: 'restart', id });
   if (current && current.id === id) setExitBanner(null);
+  clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    if (restartingId !== id) return;
+    clearRestartGuard();
+    showToast('重启超时，请重试', 4000, 'error');
+  }, 5000);
+}
+
+// 破坏性操作统一二次确认：移动端底部操作表，桌面居中浮层。
+function confirmDestructive({ title, message, confirmLabel = '删除', fn }) {
+  showMenu([
+    { label: '取消', fn: () => {} },
+    { label: confirmLabel, icon: 'trash', danger: true, fn },
+  ], { sheet: mode === 'mobile', title, message });
 }
 
 function removeSession(id) {
+  if (removing) return;
   const s = findSession(id);
   logEvent('info', 'client.session.remove', 'id=' + id + ' running=' + !!(s && !s.dead));
-  if (s && !s.dead) {
-    showMenu([
-      { label: '取消', fn: () => {} },
-      { label: '删除会话', icon: 'trash', danger: true, fn: () => sendCmd({ type: 'remove', id }) },
-    ], {
-      sheet: mode === 'mobile',
-      title: '删除正在运行的会话？',
-      message: '「' + (s.name || s.id) + '」的进程会被终止。',
-    });
-    return;
-  }
-  sendCmd({ type: 'remove', id });
+  if (!s) return;
+  const running = !s.dead;
+  confirmDestructive({
+    title: running ? '删除正在运行的会话？' : '删除会话？',
+    message: '「' + (s.name || s.id) + '」' +
+      (running ? '的进程会被终止，未保存的输出会丢失。' : '的会话记录和输出会被删除。'),
+    confirmLabel: '删除',
+    fn: () => {
+      if (removing) return;
+      removing = true;
+      pendingRemoveId = id;
+      removingCurrent = !!(current && current.id === id);
+      sendCmd({ type: 'remove', id });
+      clearTimeout(removeTimer);
+      removeTimer = setTimeout(() => {
+        if (pendingRemoveId !== id) return;
+        clearRemoveGuard();
+        removingCurrent = false;
+        showToast('删除超时，请重试', 4000, 'error');
+      }, 5000);
+    },
+  });
 }
 
 function removeCurrent() {
@@ -1227,6 +1582,9 @@ function removeCurrent() {
 }
 
 /* ---------------- 渲染 ---------------- */
+function exitLabel(s) {
+  return s.exitCode ? '已退出 · code ' + s.exitCode : '已退出';
+}
 function updateStatus() {
   const cur = current && findSession(current.id);
   const name = cur ? (cur.name || cur.id) : (current ? current.name : '—');
@@ -1245,14 +1603,14 @@ function setExitBanner(sess) {
   if (!sess) {
     exitBanner.hidden = true;
   } else {
-    exitText.textContent = '会话「' + (sess.name || sess.id) + '」已退出 (code ' + sess.exitCode + ')';
+    exitText.textContent = '会话「' + (sess.name || sess.id) + '」' + exitLabel(sess);
     exitBanner.hidden = false;
   }
   if (wasHidden !== exitBanner.hidden) layout();
 }
 
 function sessionMeta(s) {
-  if (s.dead) return '已退出' + (s.exitCode ? ' · code ' + s.exitCode : '');
+  if (s.dead) return exitLabel(s);
   return s.attached > 0 ? '运行中 · ' + s.attached + ' 在线' : '运行中';
 }
 
@@ -1273,6 +1631,7 @@ function renderTabs() {
     main.type = 'button';
     main.className = 'tab-main';
     main.title = s.name || s.id;
+    if (active) main.setAttribute('aria-current', 'true');
     const dot = document.createElement('span');
     dot.className = 'dot ' + (s.dead ? 'off' : 'on');
     const name = document.createElement('span');
@@ -1334,11 +1693,18 @@ function renderDrawer() {
     main.append(dot, copy);
     onPress(main, {
       tap: () => {
-        if (s.dead) { showSessionMenu(s); return; }
+        if (s.dead) {
+          closeDrawer({ restoreFocus: false });
+          showSessionMenu(s);
+          return;
+        }
         closeDrawer();
         switchTo(s);
       },
-      longPress: () => showSessionMenu(s),
+      longPress: () => {
+        closeDrawer({ restoreFocus: false });
+        showSessionMenu(s);
+      },
     });
 
     const more = document.createElement('button');
@@ -1346,7 +1712,10 @@ function renderDrawer() {
     more.className = 'session-more';
     more.setAttribute('aria-label', '会话操作');
     more.innerHTML = icon('more');
-    onTap(more, () => showSessionMenu(s));
+    onTap(more, () => {
+      closeDrawer({ restoreFocus: false });
+      showSessionMenu(s);
+    });
 
     li.append(main, more);
     drawerList.appendChild(li);
@@ -1357,24 +1726,43 @@ function renderDrawer() {
 function openDrawer() {
   if (mode !== 'mobile') return;
   cancelMomentum();
-  hideMenu(true);
+  hideMenu(true, false);
   clearTimeout(drawerTimer);
+  drawerTrigger = document.activeElement;
   drawer.hidden = false;
   scrim.hidden = false;
   void drawer.offsetWidth; // 强制回流，保证过渡从关闭位置开始
   drawer.classList.add('open');
   scrim.classList.add('open');
+  document.addEventListener('keydown', onDrawerKey);
+  const closeBtn = $('#drawer-close');
+  if (closeBtn) closeBtn.focus();
 }
 
-function closeDrawer() {
+function closeDrawer({ restoreFocus = true } = {}) {
+  document.removeEventListener('keydown', onDrawerKey);
   if (drawer.hidden) return;
   drawer.classList.remove('open');
   scrim.classList.remove('open');
   clearTimeout(drawerTimer);
+  const trigger = drawerTrigger;
+  drawerTrigger = null;
   drawerTimer = setTimeout(() => {
     drawer.hidden = true;
     scrim.hidden = true;
+    if (restoreFocus && !menuOpen && menuLayer.hidden && focusable(trigger)) trigger.focus();
   }, 240);
+}
+
+function onDrawerKey(e) {
+  if (e.key === 'Escape') {
+    // 只关最上层：日志/菜单/粘贴打开时留给它们处理。
+    if (!logLayer.hidden || menuOpen || !pasteLayer.hidden) return;
+    e.preventDefault();
+    closeDrawer();
+    return;
+  }
+  trapTab(e, drawer);
 }
 
 onTap($('#m-menu-btn'), openDrawer);
@@ -1411,7 +1799,8 @@ function showSessionMenu(s, opts = {}) {
 }
 
 function showMenu(items, opts = {}) {
-  hideMenu(true);
+  hideMenu(true, false);
+  menuTrigger = document.activeElement;
   const sheet = opts.sheet !== undefined ? opts.sheet : mode === 'mobile';
   menuLayer.className = sheet ? 'sheet' : 'popover';
   menuLayer.hidden = false;
@@ -1459,6 +1848,8 @@ function showMenu(items, opts = {}) {
   menuLayer.classList.add('open');
   menuOpen = true;
   document.addEventListener('keydown', onMenuKey);
+  const first = menuEl.querySelector('.menu-item:not(:disabled):not(.menu-stepper)');
+  if (first) first.focus();
 }
 
 function buildMenuItem(item) {
@@ -1481,10 +1872,12 @@ function buildMenuItem(item) {
   if (item.checked) b.insertAdjacentHTML('beforeend', icon('check', 'mi-check'));
   if (item.fn && !item.disabled) {
     onTap(b, () => {
-      hideMenu();
+      hideMenu(false, false);
       item.fn();
-      if (mode === 'desktop' && term && logLayer.hidden) {
-        setTimeout(() => { if (!menuOpen) term.focus(); }, 0);
+      if (mode === 'desktop' && term) {
+        setTimeout(() => {
+          if (!menuOpen && logLayer.hidden && pasteLayer.hidden) term.focus();
+        }, 0);
       }
     });
   }
@@ -1560,34 +1953,79 @@ function positionMenu(opts) {
   menuEl.style.top = clamp(y, pad, Math.max(pad, vh - mh - pad)) + 'px';
 }
 
-function hideMenu(immediate = false) {
-  if (!menuOpen && menuLayer.hidden) return;
+function hideMenu(immediate = false, restoreFocus = true) {
+  if (!menuOpen && menuLayer.hidden) {
+    menuTrigger = null;
+    return;
+  }
   menuOpen = false;
   document.removeEventListener('keydown', onMenuKey);
   menuLayer.classList.remove('open');
   clearTimeout(menuTimer);
-  if (immediate) {
+  const trigger = menuTrigger;
+  menuTrigger = null;
+  const finish = () => {
     menuLayer.hidden = true;
     menuEl.innerHTML = '';
-  } else {
-    menuTimer = setTimeout(() => {
-      menuLayer.hidden = true;
-      menuEl.innerHTML = '';
-    }, 200);
+    if (restoreFocus && focusable(trigger) && logLayer.hidden && pasteLayer.hidden) {
+      trigger.focus();
+    }
+  };
+  if (immediate) finish();
+  else menuTimer = setTimeout(finish, 200);
+}
+
+// Tab 在当前浮层内循环，避免焦点跑到背后的终端。
+function trapTab(e, container) {
+  if (e.key !== 'Tab') return false;
+  const nodes = Array.from(container.querySelectorAll(
+    'button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => el instanceof HTMLElement && (el.offsetParent !== null || el === document.activeElement));
+  if (!nodes.length) return false;
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+    return true;
   }
+  if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
 }
 
 function onMenuKey(e) {
   if (e.key === 'Escape') {
+    if (!logLayer.hidden || !pasteLayer.hidden) return; // 上层优先
     e.preventDefault();
     hideMenu();
+    return;
   }
+  if (e.key === 'Tab') {
+    trapTab(e, menuEl);
+    return;
+  }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+  const nodes = Array.from(menuEl.querySelectorAll('.menu-item:not(:disabled):not(.menu-stepper)'));
+  if (!nodes.length) return;
+  e.preventDefault();
+  const idx = nodes.indexOf(document.activeElement);
+  let next;
+  if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = nodes.length - 1;
+  else if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % nodes.length;
+  else next = idx < 0 ? nodes.length - 1 : (idx - 1 + nodes.length) % nodes.length;
+  nodes[next].focus();
 }
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || menuOpen) return;
-  if (!drawer.hidden) { e.preventDefault(); closeDrawer(); }
-  else if (selection.active) { e.preventDefault(); clearSelection(); }
+  // 各浮层自己处理 Escape；这里只兜底清除终端选区。
+  if (!drawer.hidden || !logLayer.hidden || !pasteLayer.hidden) return;
+  if (selection.active) { e.preventDefault(); clearSelection(); }
 });
 
 menuScrim.addEventListener('pointerdown', (e) => {
@@ -1623,6 +2061,7 @@ function terminalMenu() {
     label: '检查更新',
     icon: 'download',
     hint: versionLabel(serverVersion),
+    disabled: updateState !== 'idle',
     fn: checkUpdate,
   });
   return items;
@@ -1636,29 +2075,116 @@ function sessionMenu(s) {
 }
 
 /* ---------------- 自更新 ---------------- */
-async function checkUpdate() {
-  logEvent('info', 'client.update.check', 'current=' + serverVersion);
-  showToast('正在检查更新…', 5000);
-  let resp;
-  try {
-    resp = await fetch('/update', { cache: 'no-store' });
-  } catch (err) {
-    logEvent('error', 'client.update.check_failed', (err && err.message) || String(err));
-    showToast('检查更新失败: 无法连接服务器', 4000);
+function showUpdateBanner(text, kind = 'info', sticky = false) {
+  if (!updateBanner || !updateText) return;
+  updateText.textContent = text;
+  updateBanner.dataset.kind = kind;
+  updateBanner.hidden = false;
+  clearTimeout(updateBannerTimer);
+  updateBannerTimer = null;
+  if (!sticky) {
+    updateBannerTimer = setTimeout(() => { updateBanner.hidden = true; }, kind === 'error' ? 8000 : 5000);
+  }
+}
+
+function clearUpdateBanner() {
+  clearTimeout(updateBannerTimer);
+  updateBannerTimer = null;
+  clearTimeout(updateVerifyTimer);
+  updateVerifyTimer = null;
+  clearTimeout(restartWatchdogTimer);
+  restartWatchdogTimer = null;
+  if (updateBanner) updateBanner.hidden = true;
+}
+
+// hello 携带新版本号时校验更新是否真的生效；同一连接只保留一个验证定时器。
+function handleHelloVersion(v) {
+  const prev = serverVersion;
+  serverVersion = v;
+  clearTimeout(updateVerifyTimer);
+  updateVerifyTimer = null;
+  clearTimeout(restartWatchdogTimer);
+  restartWatchdogTimer = null;
+
+  if (!pendingUpdateVersion) {
+    if (prev && v !== prev) showToast('已更新到 ' + versionLabel(v), 3500, 'success');
     return;
   }
-  if (resp.status === 401) { showLogin(); return; }
+  if (v !== prev) {
+    updateState = 'done';
+    pendingUpdateVersion = '';
+    showUpdateBanner('已更新到 ' + versionLabel(v), 'success');
+    setTimeout(() => { if (updateState === 'done') updateState = 'idle'; }, 5000);
+    return;
+  }
+  // 重连后版本没变：给服务端 15s 完成切换，再判定失败。
+  if (updateState === 'restarting') {
+    updateVerifyTimer = setTimeout(() => {
+      updateVerifyTimer = null;
+      if (!pendingUpdateVersion || updateState !== 'restarting') return;
+      updateState = 'failed';
+      pendingUpdateVersion = '';
+      showUpdateBanner('更新未生效，请查看服务端日志', 'error');
+      setTimeout(() => { if (updateState === 'failed') updateState = 'idle'; }, 5000);
+    }, 15000);
+  }
+}
+
+// 进程切换后 WS 一直连不上：60s 兜底，避免“正在切换进程”永久停留。
+function startRestartWatchdog() {
+  clearTimeout(restartWatchdogTimer);
+  restartWatchdogTimer = setTimeout(() => {
+    restartWatchdogTimer = null;
+    if (updateState !== 'restarting') return;
+    updateState = 'failed';
+    pendingUpdateVersion = '';
+    showUpdateBanner('更新后未能重新连接，请查看服务端日志', 'error');
+    setTimeout(() => { if (updateState === 'failed') updateState = 'idle'; }, 5000);
+  }, 60000);
+}
+
+async function checkUpdate() {
+  if (updateState !== 'idle') return;
+  updateState = 'checking';
+  logEvent('info', 'client.update.check', 'current=' + serverVersion);
+  hideToast();
+  showToast('正在检查更新…', 2000, 'info');
+  let resp;
+  try {
+    resp = await fetchWithTimeout('/update', { cache: 'no-store' }, 10000);
+  } catch (err) {
+    updateState = 'idle';
+    logEvent('error', 'client.update.check_failed', (err && err.message) || String(err));
+    showToast('检查更新失败: 无法连接服务器', 4000, 'error');
+    return;
+  }
+  if (resp.status === 401) {
+    updateState = 'idle';
+    hideToast();
+    showLogin();
+    return;
+  }
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
+    updateState = 'idle';
     logEvent('warn', 'client.update.check_error', data.error || ('status=' + resp.status));
-    showToast(data.error || ('检查更新失败 (' + resp.status + ')'), 4500);
+    showToast(data.error || ('检查更新失败 (' + resp.status + ')'), 4500, 'error');
+    return;
+  }
+  if (data.updating) {
+    updateState = 'idle';
+    showToast('已有更新正在进行', 3000, 'warn');
     return;
   }
   if (!data.available) {
-    showToast('已是最新版本 ' + versionLabel(data.current || serverVersion), 3000);
+    updateState = 'idle';
+    showToast('已是最新版本 ' + versionLabel(data.current || serverVersion), 3000, 'info');
     return;
   }
+  updateState = 'idle'; // 让“取消”后仍可再次检查
   logEvent('info', 'client.update.available', 'current=' + data.current + ' latest=' + data.latest);
+  const handoff = !!(cfg && cfg.capabilities && cfg.capabilities.handoff);
+  const risk = handoff ? '正在运行的会话会保留' : '正在运行的会话可能丢失，请先保存工作';
   showMenu([
     { label: '取消', fn: () => {} },
     {
@@ -1669,38 +2195,57 @@ async function checkUpdate() {
   ], {
     sheet: mode === 'mobile',
     title: '发现新版本',
-    message: '当前 ' + versionLabel(data.current) + ' → ' + versionLabel(data.latest) + '；正在运行的会话会保留',
+    message: '当前 ' + versionLabel(data.current || serverVersion) + ' → ' + versionLabel(data.latest) +
+      '；更新会重启服务，' + risk,
   });
 }
 
 async function installUpdate(latest) {
+  if (updateState !== 'idle') return;
+  updateState = 'installing';
   logEvent('info', 'client.update.install', 'latest=' + latest);
-  showToast('正在下载并安装 ' + versionLabel(latest) + '…', 120000);
+  hideToast();
+  showUpdateBanner('正在下载并安装 ' + versionLabel(latest) + '…', 'info', true);
   let resp;
   try {
-    resp = await fetch('/update', {
+    resp = await fetchWithTimeout('/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Onet-Update': '1' },
       body: '{}',
-    });
+    }, 120000);
   } catch (err) {
+    updateState = 'failed';
+    pendingUpdateVersion = '';
     logEvent('error', 'client.update.install_failed', (err && err.message) || String(err));
-    showToast('更新请求失败，请检查服务端日志', 5000);
+    showUpdateBanner('更新请求失败，请检查服务端日志', 'error');
+    setTimeout(() => { if (updateState === 'failed') updateState = 'idle'; }, 5000);
     return;
   }
   const data = await resp.json().catch(() => ({}));
-  if (resp.status === 401) { showLogin(); return; }
+  if (resp.status === 401) {
+    updateState = 'idle';
+    pendingUpdateVersion = '';
+    clearUpdateBanner();
+    showLogin();
+    return;
+  }
   if (!resp.ok) {
+    updateState = 'failed';
     logEvent('warn', 'client.update.install_error', data.error || ('status=' + resp.status));
-    showToast(data.error || ('更新失败 (' + resp.status + ')'), 5000);
+    showUpdateBanner(data.error || ('更新失败 (' + resp.status + ')'), 'error');
+    setTimeout(() => { if (updateState === 'failed') updateState = 'idle'; }, 5000);
     return;
   }
   if (!data.updated) {
-    showToast('已是最新版本', 3000);
+    updateState = 'idle';
+    showUpdateBanner('已是最新版本', 'info');
     return;
   }
+  updateState = 'restarting';
+  pendingUpdateVersion = data.to || latest;
   logEvent('info', 'client.update.restarting', 'from=' + data.from + ' to=' + data.to);
-  showToast('已安装 ' + versionLabel(data.to) + '，正在切换进程…', 15000);
+  showUpdateBanner('已安装 ' + versionLabel(data.to) + '，正在切换进程…', 'info', true);
+  startRestartWatchdog();
 }
 
 function toggleKeys() {
@@ -1732,34 +2277,74 @@ function copyAll() {
   term.selectAll();
   const sel = term.getSelection();
   term.clearSelection();
-  if (sel) {
-    writeClipboard(sel)
-      .then(() => showToast('已复制全部'))
-      .catch((err) => { logClipboardError('copy-all', err); showToast('复制失败'); });
-  }
+  if (!sel) { showToast('没有可复制的内容', 3000, 'warn'); return; }
+  writeClipboard(sel)
+    .then(() => showToast('已复制全部', 1800, 'success'))
+    .catch((err) => { logClipboardError('copy-all', err); showToast('复制失败', 5000, 'error'); });
 }
 function copySelectionOrAll() {
   if (!term) return;
   if (term.hasSelection()) {
     const text = term.getSelection();
+    if (!text) { showToast('没有可复制的内容', 3000, 'warn'); return; }
     writeClipboard(text).then(() => {
-      showToast('已复制');
+      showToast('已复制', 1800, 'success');
       term.clearSelection();
       selection = { active: false, anchor: 0, focus: 0 };
       selectBar.hidden = true;
-    }).catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败'); });
+    }).catch((err) => { logClipboardError('copy-selection', err); showToast('复制失败', 5000, 'error'); });
   } else {
     copyAll();
   }
 }
+
+// HTTP 局域网（非 secure context）没有剪贴板读权限，必须提供手动粘贴面板。
+function openPasteSheet() {
+  if (!pasteLayer || !pasteInput) {
+    showToast('无法打开粘贴面板', 3000, 'warn');
+    return;
+  }
+  if (term) term.blur();
+  pasteInput.value = '';
+  pasteLayer.hidden = false;
+  pasteInput.focus();
+  document.addEventListener('keydown', onPasteKey);
+}
+
+function closePasteSheet({ insert = false } = {}) {
+  document.removeEventListener('keydown', onPasteKey);
+  if (!pasteLayer || pasteLayer.hidden) return;
+  const value = insert && pasteInput ? pasteInput.value : '';
+  pasteLayer.hidden = true;
+  if (pasteInput) pasteInput.blur();
+  if (value && term) term.paste(value);
+  // 桌面回到终端；移动端不强制聚焦，避免软键盘被重新拉起。
+  if (mode === 'desktop' && term) term.focus();
+}
+
+function onPasteKey(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closePasteSheet();
+    return;
+  }
+  const panel = $('#paste-panel');
+  if (panel) trapTab(e, panel);
+}
+
 async function paste() {
   if (!term) return;
+  if (!window.isSecureContext || typeof navigator.clipboard?.readText !== 'function') {
+    openPasteSheet();
+    return;
+  }
   try {
     const text = await navigator.clipboard.readText();
+    if (!text) { openPasteSheet(); return; }
     term.paste(text);
   } catch (err) {
     logClipboardError('paste', err);
-    showToast('无法读取剪贴板，请用系统粘贴');
+    openPasteSheet();
   }
 }
 
@@ -1798,7 +2383,7 @@ function renderKeys() {
     const startRepeat = () => {
       if (!REPEAT_KEYS.has(k) || repeatTimer) return;
       held = true;
-      repeatTimer = setInterval(() => pressKey(k), 80);
+      repeatTimer = setInterval(() => pressKey(k), REPEAT_INTERVAL_MS);
     };
 
     b.addEventListener('pointerdown', (ev) => {
@@ -1810,9 +2395,9 @@ function renderKeys() {
           holdTimer = null;
           held = true;
           toggleMod(upper.toLowerCase(), true); // 长按 = 锁定
-        }, 500);
+        }, LONG_PRESS_MS);
       } else if (REPEAT_KEYS.has(k)) {
-        holdTimer = setTimeout(startRepeat, 420);
+        holdTimer = setTimeout(startRepeat, LONG_PRESS_MS);
       }
     });
     b.addEventListener('pointerup', (ev) => {
@@ -1901,11 +2486,31 @@ onTap($('#select-all'), selectAllBuffer);
 onTap($('#select-cancel'), clearSelection);
 
 /* ---------------- 轻提示 ---------------- */
-function showToast(text, ms = 1800) {
+const TOAST_MS = { info: 1800, success: 1800, warn: 3000, error: 5000 };
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  toastTimer = null;
+  toastActiveKind = 'info';
+  toastUntil = 0;
+  if (toast) toast.hidden = true;
+}
+
+// kind: info|success|warn|error。错误优先：活跃 error 不被普通提示覆盖；
+// warn 可被更明确的 success/error 替换，避免“连接断开”在重连成功后继续停留。
+function showToast(text, ms, kind = 'info') {
+  if (!toast) return;
+  const now = performance.now();
+  if (now < toastUntil && toastActiveKind === 'error' && kind !== 'error') return;
+  const duration = (ms === undefined || ms === null) ? (TOAST_MS[kind] || 1800) : ms;
   toast.textContent = text;
+  toast.dataset.kind = kind;
+  toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.hidden = true; }, ms);
+  toastActiveKind = kind;
+  toastUntil = now + duration;
+  toastTimer = setTimeout(hideToast, duration);
 }
 
 /* ---------------- 日志面板 ---------------- */
@@ -1945,17 +2550,39 @@ function openLogs() {
   if (!term) return;
   flushClientLogs();
   persistLogQueue();
+  logTrigger = document.activeElement;
   logLayer.hidden = false;
   term.blur(); // 让出焦点，面板内可以正常选中文本
   setLogSource('client');
   refreshServerLogs();
+  const closeBtn = $('#log-close');
+  if (closeBtn) closeBtn.focus();
+  document.addEventListener('keydown', onLogKey);
   logEvent('debug', 'client.logs.open');
 }
 
+function focusable(el) {
+  return !!(el && el.isConnected && el.offsetParent !== null);
+}
+
 function closeLogs() {
+  document.removeEventListener('keydown', onLogKey);
   if (logLayer.hidden) return;
   logLayer.hidden = true;
-  if (mode === 'desktop' && term) term.focus();
+  const trigger = logTrigger;
+  logTrigger = null;
+  if (focusable(trigger)) trigger.focus();
+  else if (mode === 'desktop' && term) term.focus();
+}
+
+function onLogKey(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeLogs();
+    return;
+  }
+  const panel = $('#log-panel');
+  if (panel) trapTab(e, panel);
 }
 
 function setLogSource(src) {
@@ -2002,13 +2629,13 @@ async function refreshLogs() {
 
 async function copyLogs() {
   const text = logSource === 'client' ? clientLogText() : (serverLogText || serverLogError);
-  if (!text) { showToast('没有日志'); return; }
+  if (!text) { showToast('没有日志', 1800, 'info'); return; }
   try {
     await writeClipboard(text);
-    showToast('已复制');
+    showToast('已复制', 1800, 'success');
   } catch (err) {
     logClipboardError('copy-logs', err);
-    showToast('复制失败');
+    showToast('复制失败', 5000, 'error');
   }
 }
 
@@ -2027,7 +2654,7 @@ async function downloadLogs() {
     if (r.ok) serverText = await r.text();
   } catch { /* 服务端部分拿不到时仍下载客户端日志 */ }
   const text = clientText + serverText;
-  if (!text) { showToast('没有日志'); return; }
+  if (!text) { showToast('没有日志', 1800, 'info'); return; }
 
   const blob = new Blob([text], { type: 'application/x-ndjson' });
   const url = URL.createObjectURL(blob);
@@ -2050,11 +2677,16 @@ onTap($('#log-download'), downloadLogs);
 onTap(logTabClient, () => setLogSource('client'));
 onTap(logTabServer, () => setLogSource('server'));
 logLayer.addEventListener('pointerdown', (e) => { if (e.target === logLayer) closeLogs(); });
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || logLayer.hidden) return;
-  e.preventDefault();
-  closeLogs();
-});
+
+/* ---------------- 手动粘贴面板 ---------------- */
+if (pasteOk) onTap(pasteOk, () => closePasteSheet({ insert: true }));
+if (pasteCancel) onTap(pasteCancel, () => closePasteSheet());
+if (pasteLayer) {
+  pasteLayer.addEventListener('pointerdown', (e) => {
+    if (e.target === pasteLayer) closePasteSheet();
+  });
+}
+if (bootRetry) onTap(bootRetry, () => location.reload());
 
 /* ---------------- 启动 ---------------- */
 restoreLogQueue();

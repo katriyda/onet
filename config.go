@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config 是 onet 的可选 JSON 配置文件结构。
@@ -25,6 +27,10 @@ type Config struct {
 	LogMaxSizeMB  int    `json:"log_max_size_mb"` // 单文件上限（MB），默认 20，0 = 不轮转
 	LogMaxBackups int    `json:"log_max_backups"` // 保留历史份数，默认 5，0 = 轮转时截断
 	LogTerminalIO bool   `json:"log_terminal_io"` // 默认 false；true 时记录 PTY 原始输入/输出
+
+	// AllowInsecure 允许非回环监听且 token 为空（局域网手机直连等场景）。
+	// 默认 false：非回环 + 空 token 会拒绝启动。
+	AllowInsecure bool `json:"allow_insecure"`
 
 	logFileGiven bool // 非 JSON：配置文件是否显式给出 log_file
 }
@@ -119,6 +125,9 @@ func Load(path string) (Config, error) {
 	if _, ok := raw["log_terminal_io"]; ok {
 		cfg.LogTerminalIO = given.LogTerminalIO
 	}
+	if _, ok := raw["allow_insecure"]; ok {
+		cfg.AllowInsecure = given.AllowInsecure
+	}
 
 	// 相对路径按配置文件所在目录解析（与二进制同目录的 config.json 行为一致）。
 	if cfg.LogFile != "" && !filepath.IsAbs(cfg.LogFile) {
@@ -129,6 +138,33 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// isLoopbackHost 判断监听地址是否只对本机可见。
+func isLoopbackHost(h string) bool {
+	h = strings.TrimSpace(h)
+	switch strings.ToLower(h) {
+	case "", "localhost":
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(h, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateConfig 在监听前检查安全边界：非回环 + 空 token 默认拒绝启动。
+// allow_insecure=true 时显式放行，并记录一条 WARN 供审计。
+func validateConfig(cfg Config) error {
+	if isLoopbackHost(cfg.Host) || cfg.Token != "" {
+		return nil
+	}
+	if !cfg.AllowInsecure {
+		appLog.Error("app.insecure_refused", "host", cfg.Host,
+			"reason", "非回环监听且 token 为空；设置 token 或 allow_insecure=true")
+		return fmt.Errorf("配置错误: host=%q 非回环监听且 token 为空（设置 token，或显式 allow_insecure=true）", cfg.Host)
+	}
+	appLog.Warn("app.insecure_allowed", "host", cfg.Host,
+		"detail", "非回环监听且 token 为空：同一网络内任何人都能访问完整 shell")
+	return nil
 }
 
 // Validate 校验配置取值。

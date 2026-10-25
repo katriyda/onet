@@ -7,7 +7,7 @@
 <meta name="color-scheme" content="dark">
 <title>onet</title>
 <link rel="stylesheet" href="/static/vendor/xterm.css?v=1">
-<link rel="stylesheet" href="/static/style.css?v=8">
+<link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false"><defs>
@@ -52,11 +52,19 @@
     <div id="exit-banner" hidden>
       <span id="exit-text"></span>
       <div class="banner-actions">
-        <button id="exit-restart" class="btn small">重启</button>
-        <button id="exit-remove" class="btn small danger">删除</button>
+        <button id="exit-restart" class="btn small" aria-label="重启会话">重启</button>
+        <button id="exit-remove" class="btn small danger" aria-label="删除会话">删除</button>
       </div>
     </div>
+
+    <div id="update-banner" role="status" aria-live="polite" hidden>
+      <span id="update-text"></span>
+    </div>
   </header>
+
+  <div id="update-banner" role="status" aria-live="polite" hidden>
+    <span id="update-text"></span>
+  </div>
 
   <main id="term-wrap">
     <div id="term"></div>
@@ -85,7 +93,7 @@
 </div>
 
 <div id="scrim" hidden></div>
-<nav id="drawer" hidden aria-label="会话列表">
+<nav id="drawer" role="dialog" aria-modal="true" aria-label="会话列表" hidden>
   <div id="drawer-head">
     <div>
       <div class="sheet-title">会话</div>
@@ -103,7 +111,7 @@
 </div>
 
 <div id="log-layer" hidden>
-  <section id="log-panel" role="dialog" aria-modal="true" aria-label="日志">
+  <section id="log-panel" role="dialog" aria-modal="true" aria-label="日志" tabindex="-1">
     <div id="log-head">
       <div>
         <div class="sheet-title">日志</div>
@@ -134,10 +142,26 @@
   </form>
 </div>
 
+<div id="boot-error" role="alert" hidden>
+  <p id="boot-error-text">无法连接服务器</p>
+  <button id="boot-retry" class="btn primary">重试</button>
+</div>
+
+<div id="paste-layer" hidden>
+  <section id="paste-panel" role="dialog" aria-modal="true" aria-label="粘贴">
+    <div class="sheet-title">粘贴</div>
+    <textarea id="paste-input" placeholder="在此粘贴文本" autocapitalize="off" spellcheck="false"></textarea>
+    <div class="paste-actions">
+      <button id="paste-cancel" class="btn small">取消</button>
+      <button id="paste-ok" class="btn small primary">插入</button>
+    </div>
+  </section>
+</div>
+
 <div id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="/static/vendor/xterm.js?v=1"></script>
 <script src="/static/vendor/addon-fit.js?v=1"></script>
-<script src="/static/app.js?v=16"></script>
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

@@ -65,7 +65,8 @@ CLI 只替换二进制文件，不重启服务、不影响已有会话：更新�
   "log_level": "info",
   "log_max_size_mb": 20,
   "log_max_backups": 5,
-  "log_terminal_io": false
+  "log_terminal_io": false,
+  "allow_insecure": false
 }
 ```
 
@@ -85,6 +86,7 @@ CLI 只替换二进制文件，不重启服务、不影响已有会话：更新�
 | `log_max_size_mb` | `20` | 单个日志文件上限（MB），超出后轮转到 `onet.log.1`；`0` = 不轮转 |
 | `log_max_backups` | `5` | 保留的历史份数；`0` = 轮转时直接截断当前文件 |
 | `log_terminal_io` | `false` | 开启后记录 PTY 原始输入/输出（base64），**可能包含密码、token 等敏感数据** |
+| `allow_insecure` | `false` | 非回环监听且 token 为空时，默认拒绝启动；显式设为 `true` 才允许（启动日志会有 `app.insecure_allowed` WARN） |
 
 ## 日志
 
@@ -105,6 +107,7 @@ CLI 只替换二进制文件，不重启服务、不影响已有会话：更新�
 ## 安全
 
 - 默认只监听 `127.0.0.1`，仅本机可访问，无认证。
+- **非回环监听（如 `0.0.0.0`）且 token 为空时默认拒绝启动**；确需局域网直连（如手机）时显式设置 `"allow_insecure": true`，启动日志会写 `app.insecure_allowed` WARN。
 - **对外开放前必须设置 `token`**：未携带有效 token 时，`/config`、`/logs`、`/update`、`/ws` 等接口返回 401，页面显示令牌输入页。token 可通过 cookie（登录页）、`?token=` 参数或 `Authorization: Bearer` 头传递。
 - `/update` 的 `POST` 会下载并替换当前二进制，额外要求同源自定义头 `X-Onet-Update: 1`（防 CSRF）；拿到 token 等同于拥有该机器的 shell 权限。
 - 传输为明文 HTTP；需要加密时请置于反向代理（nginx/Caddy）或 Tailscale Serve 之后。

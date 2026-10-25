@@ -64,12 +64,46 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/static/", s.handleStatic)
+	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/config", s.handleConfig)
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/update", s.handleUpdate)
 	mux.HandleFunc("/ws", s.handleWS)
 	return s.withAccessLog(mux)
+}
+
+// handleHealthz 只给本机回环地址使用：更新器在切换进程后确认新实例已监听。
+// 不暴露 token、会话等任何敏感信息；非回环一律 404。
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRemote(r.RemoteAddr) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]any{
+		"status":  "ok",
+		"version": version,
+		"resumed": handoffSupported(),
+	})
+}
+
+// isLoopbackRemote 判断 RemoteAddr 是否为回环地址（兼容带/不带端口）。
+func isLoopbackRemote(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ---------- 访问日志 ----------
@@ -229,8 +263,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg.Token = ""
 	writeJSON(w, struct {
 		Config
-		Version string `json:"version"`
-	}{Config: cfg, Version: version})
+		Version      string       `json:"version"`
+		Capabilities capabilities `json:"capabilities"`
+	}{Config: cfg, Version: version, Capabilities: serverCapabilities()})
 }
 
 type loginReq struct {
@@ -365,7 +400,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	appLog.Info("ws.open", "conn", client.logID(), "remote", r.RemoteAddr, "ua", r.UserAgent())
 	// 先告知客户端连接标识，浏览器日志据此关联到同一连接。
-	client.write(mustJSON(helloMsg{Type: "hello", Conn: client.logID(), Version: version}))
+	client.write(mustJSON(helloMsg{
+		Type:         "hello",
+		Conn:         client.logID(),
+		Version:      version,
+		Capabilities: serverCapabilities(),
+	}))
 
 	var attached *Session
 	var closeErr error
@@ -427,13 +467,14 @@ func cmdErr(client *Client, cmd, msg string) []byte {
 // handleCommand 处理一条二进制 JSON 命令，返回需要回复的帧（可为 nil）。
 func (s *Server) handleCommand(client *Client, attached **Session, data []byte) []byte {
 	var cmd struct {
-		Type    string           `json:"type"`
-		Name    string           `json:"name"`
-		ID      string           `json:"id"`
-		Cols    int              `json:"cols"`
-		Rows    int              `json:"rows"`
-		Client  string           `json:"client"`
-		Entries []clientLogEntry `json:"entries"`
+		Type     string           `json:"type"`
+		Name     string           `json:"name"`
+		ID       string           `json:"id"`
+		Cols     int              `json:"cols"`
+		Rows     int              `json:"rows"`
+		SinceSeq *uint64          `json:"since_seq"`
+		Client   string           `json:"client"`
+		Entries  []clientLogEntry `json:"entries"`
 	}
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		appLog.Warn("ws.bad_command", "conn", client.logID(), "bytes", len(data), "err", err)
@@ -444,6 +485,10 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 	if cmd.Type == "log" {
 		handleClientLogs(client, cmd.Client, cmd.Entries)
 		return nil
+	}
+	// 心跳：高频且无需落盘。
+	if cmd.Type == "ping" {
+		return mustJSON(pongMsg{Type: "pong"})
 	}
 
 	// list / resize 高频且信息量低 → debug。
@@ -467,7 +512,7 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 		return mustJSON(sessionsMsg{Type: "sessions", Sessions: s.mgr.List()})
 
 	case "create":
-		sess, err := s.mgr.Create(cmd.Name)
+		sess, err := s.mgr.Create(cmd.Name, cmd.Cols, cmd.Rows)
 		if err != nil {
 			return cmdErr(client, cmd.Type, err.Error())
 		}
@@ -485,11 +530,17 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 		if *attached != nil && *attached != sess {
 			(*attached).Detach(client)
 		}
-		if err := sess.Attach(client); err != nil {
+		if err := sess.Attach(client, cmd.SinceSeq); err != nil {
 			return cmdErr(client, cmd.Type, "会话已退出")
 		}
+		// attach 携带客户端当前尺寸：首帧就不再是 80×24，也避免二次 reflow。
+		if cmd.Cols > 0 && cmd.Rows > 0 {
+			if cols, rows := sess.Size(); cols != cmd.Cols || rows != cmd.Rows {
+				sess.Resize(cmd.Cols, cmd.Rows)
+			}
+		}
 		*attached = sess
-		return mustJSON(attachedMsg{Type: "attached", ID: sess.ID})
+		return nil
 
 	case "detach":
 		if *attached != nil {
@@ -592,19 +643,43 @@ type createdMsg struct {
 }
 
 type attachedMsg struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	Seq       uint64 `json:"seq"`
+	Resumed   bool   `json:"resumed"`
+	Truncated bool   `json:"truncated"`
+	FromSeq   uint64 `json:"from_seq"`
 }
 
 type detachedMsg struct {
 	Type string `json:"type"`
 }
 
-// helloMsg 连接建立后的第一帧：告知客户端日志标识与当前版本。
+// capabilities 让前端在协议升级期安全降级：缺少字段即按旧服务端处理。
+type capabilities struct {
+	AttachOrder string `json:"attachOrder"` // "attached-first"
+	Ping        bool   `json:"ping"`
+	Handoff     bool   `json:"handoff"`
+}
+
+func serverCapabilities() capabilities {
+	return capabilities{
+		AttachOrder: "attached-first",
+		Ping:        true,
+		Handoff:     handoffSupported(),
+	}
+}
+
+// helloMsg 连接建立后的第一帧：告知客户端日志标识、当前版本与能力。
 type helloMsg struct {
-	Type    string `json:"type"` // "hello"
-	Conn    string `json:"conn"` // "c1"
-	Version string `json:"version"`
+	Type         string       `json:"type"` // "hello"
+	Conn         string       `json:"conn"` // "c1"
+	Version      string       `json:"version"`
+	Capabilities capabilities `json:"capabilities"`
+}
+
+type pongMsg struct {
+	Type string `json:"type"` // "pong"
 }
 
 type noticeMsg struct {

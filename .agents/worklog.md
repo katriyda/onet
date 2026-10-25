@@ -48,3 +48,17 @@
 - 产出: handoff.go、handoff_unix.go、handoff_windows.go、handoff_test.go、handoff_windows_test.go、update_web.go、main.go、server.go、session.go、pty_unix.go、pty_windows.go、update.go、web/app.js、web/index.html、README.md、AGENTS.md
 - 结果: 完成。Windows 实测 dev→0.0.4→0.0.5 连续两次热更新，会话 PID 31660 与 shell 环境变量保持；故意用启动失败的新版本验证回滚：旧进程恢复读循环/监听并继续 0.0.5；Chromium 桌面/390×844 触屏仿真完成 UI 检查与更新 dev→0.0.3，会话保留；Linux 容器实测 dev→0.0.2，PID 20 与环境变量保留。go vet/test/build 与 linux/darwin/freebsd/windows arm64 交叉编译通过；macOS/FreeBSD 仅编译未运行，真机 IME 未复验
 - meta: files=handoff.go,handoff_unix.go,handoff_windows.go,handoff_test.go,handoff_windows_test.go,update_web.go,main.go,server.go,session.go,pty_unix.go,pty_windows.go,update.go,web/app.js,web/index.html,README.md,AGENTS.md
+
+## 2026-10-25 05:35 — 会话续传、更新可靠性与 UI 一致性
+- session: s-20261025-reliability
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 修复断线重连回到错误会话/历史截断、慢客户端静默丢输出、更新切换不可预期，以及删除/异步/粘贴/焦点/toast 等 UI 不一致
+- 做了什么:
+  - `session.go`：64KB 字节环形缓冲改为带 seq 的帧 ring（64KB–1MB，按 scrollback×64 clamp）；PTY 读取按 16KB/6ms 聚合；attach 改为 attached-first + `since_seq` 续传，truncated 后补 notice；慢客户端改为单 writer + 字节/帧上限，1013/强制断开，不再 `ws.send_drop`
+  - 服务端：`create/attach` 接受 cols/rows；`createdAt` 稳定排序；handoff 持久化 seq/ring/createdAt；`/healthz`（仅回环）、`/update` updating 状态、Windows breakaway/detached 与失败回滚；config 非回环空 token 默认拒绝，新增 `allow_insecure`
+  - 前端：重连续传/early 缓冲/缺口重同步、`?s=` 与 sessionStorage 记住会话、心跳与抖动退避；boot 重试与 `#boot-error`；更新状态机 + `#update-banner`；删除统一确认、create/remove/restart 防重入与超时、退出文案统一、HTTP 手动粘贴面板、菜单/抽屉/日志焦点管理与 Tab 循环、toast 分级与错误优先
+  - 文档：README 配置/安全、AGENTS 的 attach 顺序与 handoff/healthz 约定；新增 `session_replay_test.go`
+- 产出: session.go、server.go、config.go、main.go、handoff.go、handoff_unix.go、handoff_windows.go、update_web.go、session_replay_test.go、web/app.js、web/index.html、web/style.css、README.md、AGENTS.md、config.example.json；部署 config.json 已加 `allow_insecure:true` 并关闭 `log_terminal_io`
+- 结果: 完成。`go test -count=1 ./...`、`go vet ./...`、`go build` 通过；Node WS 实测 5000 行断线重连 `resumed=true`、首帧 lastSeq+1、无重无缺；>320KB 后重连 `truncated=true` + notice；慢客户端 16s 触发 `ws.slow_client`、无 send_drop、重连可续传；本地 release 服务驱动 Windows 热更新成功（200/409 并发保护、0.2.0、resumed、PID/回放/滚动保留、`app.handoff_done`）；Chromium 验证 boot 重试/失败重试页、粘贴面板插入、菜单/抽屉/日志焦点与 Tab、删除确认文案、退出 code 0 文案、toast error 优先。限制：慢客户端 1013 帧因对端不读无法观察，按日志+强制断开验证；CDP offline 未真正断开 WS，心跳超时未端到端复验；handoff 失败回滚路径未构造触发器
+- meta: files=session.go,server.go,config.go,main.go,handoff.go,handoff_unix.go,handoff_windows.go,update_web.go,session_replay_test.go,web/app.js,web/index.html,web/style.css,README.md,AGENTS.md,config.example.json

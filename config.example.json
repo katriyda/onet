@@ -12,5 +12,6 @@
   "log_level": "info",
   "log_max_size_mb": 20,
   "log_max_backups": 5,
-  "log_terminal_io": false
+  "log_terminal_io": false,
+  "allow_insecure": false
 }

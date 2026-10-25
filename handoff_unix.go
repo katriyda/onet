@@ -35,6 +35,10 @@ func closeHandoffHandles(handles []uint64) {
 
 func handoffInheritsListener() bool { return true }
 
+// handoffSupported 标记当前平台支持会话交接（客户端据此提示“会话会保留”）。
+// Unix 用 exec 原地替换，PID 与进程组不变，无需 Setsid。
+func handoffSupported() bool { return true }
+
 func listenerFromHandoff(st *handoffState) (net.Listener, error) {
 	if st.ListenerFD <= 0 {
 		return nil, fmt.Errorf("未携带监听 fd")

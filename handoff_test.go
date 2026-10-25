@@ -49,6 +49,17 @@ func TestHandoffStateRejectsVersion(t *testing.T) {
 	}
 }
 
+func TestHandoffStateAcceptsV1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.json")
+	if err := writeHandoffState(path, &handoffState{Version: 1, Sessions: []handoffSession{{ID: "s", Buffer: []byte("x")}}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadHandoffState(path)
+	if err != nil || st.Version != 1 {
+		t.Fatalf("v1 状态应可读取: st=%+v err=%v", st, err)
+	}
+}
+
 func TestWithHandoffEnvReplacesOldState(t *testing.T) {
 	env := []string{"PATH=/bin", handoffStateEnv + "=/old", "HOME=/tmp"}
 	got := withHandoffEnv(env, "/new")

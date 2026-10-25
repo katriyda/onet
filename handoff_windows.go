@@ -39,6 +39,9 @@ func closeHandoffHandles(handles []uint64) {
 // Windows socket 与 IOCP 关联，跨进程复制监听句柄不可靠。
 func handoffInheritsListener() bool { return false }
 
+// handoffSupported 标记当前平台支持会话交接（客户端据此提示“会话会保留”）。
+func handoffSupported() bool { return true }
+
 // listenerFromHandoff 仅在 handoffInheritsListener 为 true 时调用；Windows 不用。
 func listenerFromHandoff(_ *handoffState) (net.Listener, error) {
 	return nil, fmt.Errorf("Windows 不支持复制监听 socket")
@@ -155,7 +158,13 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = withHandoffEnv(os.Environ(), statePath)
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// 新进程必须脱离 supervisor/job object：否则旧进程退出（或被 job 清理）时
+	// 新进程会被一起杀掉，表现为“更新后服务消失”。
+	// 部分受限 job 不允许 breakaway，此时 cmd.Start 失败，走回滚路径。
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_BREAKAWAY_FROM_JOB | windows.DETACHED_PROCESS,
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -166,6 +175,7 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 		return fmt.Errorf("创建子进程 stdout 失败: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		appLog.Error("app.handoff_spawn_failed", "exe", exe, "err", err)
 		return fmt.Errorf("启动新版本失败: %w", err)
 	}
 	waitCh := make(chan error, 1)
@@ -240,7 +250,10 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 	}
 	if _, err := fmt.Fprintln(stdin, "GO"); err != nil {
 		resumeWindowsSessions(sessions, st)
-		_ = s.reopenListener()
+		if rerr := s.reopenListener(); rerr != nil {
+			appLog.Error("app.handoff_relisten_failed", "err", rerr)
+			os.Exit(1)
+		}
 		return fmt.Errorf("通知新进程接管失败: %w", err)
 	}
 	_ = stdin.Close()
@@ -248,11 +261,13 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 	line, err = lr.read(30 * time.Second)
 	if err != nil || line != "SERVING" {
 		stopChild()
-		appLog.Error("app.handoff_serving_failed", "line", line, "err", err, "wait_err", stopErr)
+		appLog.Error("app.handoff_failed", "line", line, "err", err, "wait_err", stopErr)
 
 		resumeWindowsSessions(sessions, st)
 		if rerr := s.reopenListener(); rerr != nil {
+			// 无法恢复服务：明确退出，避免进程半死（会话不可用但也不退出）。
 			appLog.Error("app.handoff_relisten_failed", "err", rerr)
+			os.Exit(1)
 		}
 		if err != nil {
 			return fmt.Errorf("新进程未能开始服务: %w", err)
@@ -262,6 +277,7 @@ func startHandoffPlatform(s *Server, st *handoffState, sessions []*Session, stat
 
 	success = true
 	_ = os.Remove(statePath)
+	appLog.Info("app.handoff_done", "exe", exe, "sessions", len(sessions))
 	appLog.Info("app.handoff_serving", "exe", exe, "sessions", len(sessions))
 	// 先断开旧 WS，main 随后 Shutdown 并退出；子进程继续持有监听 socket 与 PTY。
 	s.closeClients()
