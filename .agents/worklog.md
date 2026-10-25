@@ -247,5 +247,22 @@
 - meta: commit=e193a53 tag=v0.5.8 files=web/app.js,web/index.html
 
 
+## 2026-10-25 18:50 — 找到“一直没修复成功”的根因：真机页面被 WebView 缓存钉在旧版本
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户报“不是抽动，是内容会滚动一下，还是没修复”；解释为什么每次发布都“没效果”
+- 做了什么:
+  - 对照真机日志时间线：18:41 手机 `/config` 读到 `version=0.2.0`（一小时前就已是 0.5.8），且 `client.vp.settle` 里 `dt=60`（v0.5.6 的抓拍值，v0.5.7 起的缓动应为 ~190ms）、没有新加的 `v=` 字段 → **手机跑的仍是 app.js?v=32（v0.5.6）**，之后 0.5.7/0.5.8 的改动从未到达真机
+  - 根因：`/` 只发 `Cache-Control: no-cache`、`/config` **没有任何缓存头**；Android WebView 会把它们当“可缓存不重验”，页面就一直停在旧 HTML（进而引用旧 `app.js?v=N`）
+  - `server.go`：`/` 改 `no-store, no-cache, must-revalidate` + `Pragma: no-cache` + `Expires: 0`；`/config` GET 加 `no-store`
+  - `web/app.js`：新增 `APP_BUILD`（从 `<script src="?v=N">` 取），写进 `client.boot`（`app=`）与 `client.vp.settle`（`v=`），以后一眼就能看出真机跑的是哪份资源；`app.js?v=35`
+  - AGENTS 补缓存不变量
+- 产出: server.go、web/app.js、web/index.html、AGENTS.md；提交 a3e0260；tag/Release v0.5.9
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例验证：`/` 响应头为 `no-store, no-cache, must-revalidate` + `Pragma`/`Expires`，页面 `app.js?v=35`，日志 `client.boot app=35`、`client.vp.settle ... n=1 dt=195 v=35`；发布 v0.5.9（9 资产），`/healthz version=0.5.9`，线上页面引用 `app.js?v=35`
+  - 给用户的下一步：旧缓存条目仍可能在，首次用带查询串的地址打开（`?s=sess-1&v=35`）或清一次壳缓存；之后 `no-store` 保证不再回退
+- meta: commit=a3e0260 tag=v0.5.9 files=server.go,web/app.js,web/index.html,AGENTS.md
+
+
 
 
