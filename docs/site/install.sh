@@ -80,7 +80,7 @@ case "$os" in
   FreeBSD) os=freebsd ;;
   MINGW*|MSYS*|CYGWIN*)
     printf 'error: Windows is not supported by install.sh\n' >&2
-    printf 'use: irm https://katriyda.github.io/onet/install.ps1 | iex\n' >&2
+    printf 'use: irm https://raw.githubusercontent.com/katriyda/onet/main/docs/site/install.ps1 | iex\n' >&2
     exit 1
     ;;
   *)
