@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#08090b">
+<meta name="color-scheme" content="dark">
+<title>onet — a multiplexed web terminal</title>
+<meta name="description" content="tmux-style sessions in a browser. Mobile-first touch UI, desktop tabs, multi-client PTY broadcast, single Go binary, zero runtime dependencies.">
+<link rel="canonical" href="https://katriyda.github.io/onet/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="onet — a multiplexed web terminal">
+<meta property="og:description" content="tmux-style sessions in a browser. Mobile-first touch UI, desktop tabs, multi-client PTY broadcast, single Go binary, zero runtime dependencies.">
+<meta property="og:url" content="https://katriyda.github.io/onet/">
+<meta property="og:image" content="https://katriyda.github.io/onet/assets/desktop.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+<script src="script.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header id="top" class="site-head">
+  <div class="wrap head-inner">
+    <a class="brand" href="#top"><span class="mark">&gt;_</span> onet</a>
+    <nav aria-label="Sections">
+      <a href="#why">Why</a>
+      <a href="#install">Install</a>
+      <a href="#interface">Interface</a>
+      <a href="#config">Config</a>
+      <a href="#security">Security</a>
+      <a href="#updates">Updates</a>
+    </nav>
+    <a class="gh" href="https://github.com/katriyda/onet">GitHub ↗</a>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">A MULTIPLEXED WEB TERMINAL</p>
+        <h1 id="hero-title">
+          <span class="sr-only">onet</span>
+          <span class="logo" aria-hidden="true">█▀█ █▄░█ █▀▀ ▀█▀
+█▄█ █░▀█ ██▄ ░█░</span>
+        </h1>
+        <p class="lead">Your shell, in any browser.</p>
+        <p class="sub">tmux-style sessions for the web: detach and reattach, multiple clients on one PTY, mobile-first input. One static Go binary, zero runtime dependencies.</p>
+
+        <div class="install-block">
+          <p class="label">LINUX / MACOS / FREEBSD</p>
+          <div class="copy-wrap"><div class="cmd" data-copy><code>curl -fsSL https://katriyda.github.io/onet/install.sh | sh</code></div></div>
+        </div>
+        <div class="install-block">
+          <p class="label">WINDOWS</p>
+          <div class="copy-wrap"><div class="cmd" data-copy><code>irm https://katriyda.github.io/onet/install.ps1 | iex</code></div></div>
+        </div>
+
+        <p class="meta">MIT licensed · Go 1.26 · <a href="https://github.com/katriyda/onet/releases">All releases ↗</a> · <a href="https://github.com/katriyda/onet">Source ↗</a></p>
+      </div>
+
+      <figure class="window">
+        <div class="window-bar"><span class="dot" aria-hidden="true"></span><span>onet — 127.0.0.1:7681</span></div>
+        <img src="assets/desktop.png" width="1440" height="900" alt="onet desktop UI: session tabs above a terminal running PowerShell">
+        <figcaption>Desktop · 1440 × 900</figcaption>
+      </figure>
+    </div>
+
+    <div class="wrap">
+      <dl class="stats">
+        <div><dt>8</dt><dd>BUILD TARGETS</dd></div>
+        <div><dt>1</dt><dd>BINARY</dd></div>
+        <div><dt>0</dt><dd>RUNTIME DEPS</dd></div>
+        <div><dt>64 KB</dt><dd>REPLAY RING</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="why" class="section">
+    <div class="wrap">
+      <h2><span class="num">01 //</span> WHY</h2>
+      <p class="section-intro">The browser is not the terminal. It is a client.</p>
+
+      <div class="cards">
+        <article class="card">
+          <h3>Detach without dying</h3>
+          <p>Closing the tab, losing the network, or reloading is a detach. The shell keeps running; reattach replays the ring buffer and resumes live output.</p>
+        </article>
+        <article class="card">
+          <h3>Many clients, one PTY</h3>
+          <p>Every browser attaches to the same process. Output is broadcast; any client can resize; input from all clients is forwarded.</p>
+        </article>
+        <article class="card">
+          <h3>Touch gets a key bar</h3>
+          <p>Termux-style keys, edge-swipe sessions, long-press line selection, pinch zoom. Desktop gets tabs, context menus, and shortcuts. Layout follows the input device.</p>
+        </article>
+        <article class="card">
+          <h3>One file, no runtime</h3>
+          <p>The frontend is embedded with go:embed: no Node, no database, no container. Download, run, open a port.</p>
+        </article>
+        <article class="card">
+          <h3>Updates that keep shells</h3>
+          <p>Upgrade from the web UI; the new process inherits PTY handles and the replay buffer. Sessions survive and the page reconnects in about a second.</p>
+        </article>
+        <article class="card">
+          <h3>Logs you can read</h3>
+          <p>Server events and browser-side errors land in one rotating JSONL stream, viewable and downloadable from the terminal menu.</p>
+        </article>
+      </div>
+
+      <pre class="diagram" aria-hidden="true">browser ── ws ──┐
+phone   ── ws ──┼── onet ── pty ── shell
+tablet  ── ws ──┘            └── 64 KB replay ring</pre>
+
+      <p class="section-note">Each session is a PTY process with a 64 KB ring buffer. Attach sends the replay first, then live output; disconnect is detach, not termination. Deep-link with ?s=&lt;session&gt;.</p>
+    </div>
+  </section>
+
+  <section id="install" class="section">
+    <div class="wrap">
+      <h2><span class="num">02 //</span> INSTALL</h2>
+      <p class="section-intro">One binary. Pick a lane.</p>
+
+      <div class="lane">
+        <h3 class="lane-title">// SCRIPT</h3>
+        <p class="lane-sub">Linux, macOS, FreeBSD</p>
+        <div class="copy-wrap"><div class="cmd" data-copy><code>curl -fsSL https://katriyda.github.io/onet/install.sh | sh</code></div></div>
+        <p>Detects OS and architecture, downloads the matching release, verifies SHA256 against checksums.txt, and atomically replaces the binary. No sudo, no rc-file edits.</p>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>-v, --version &lt;tag&gt;</code></td><td>Install a specific release, e.g. <code>v0.3.1</code></td></tr>
+              <tr><td><code>-d, --dir &lt;path&gt;</code></td><td>Install directory; default <code>$HOME/.local/bin</code></td></tr>
+              <tr><td><code>-h, --help</code></td><td>Usage</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="fine">ONET_VERSION and ONET_INSTALL_DIR do the same; flags win. Releases published without checksums.txt install with a warning instead of failing.</p>
+      </div>
+
+      <div class="lane">
+        <h3 class="lane-title">// WINDOWS</h3>
+        <div class="copy-wrap"><div class="cmd" data-copy><code>irm https://katriyda.github.io/onet/install.ps1 | iex</code></div></div>
+        <p>Installs to %LOCALAPPDATA%\Programs\onet and appends it to the user PATH. No administrator prompt. With irm | iex, pass options via ONET_VERSION, ONET_INSTALL_DIR, or ONET_NO_PATH=1; the saved script also takes -Version, -Dir, -NoPath.</p>
+      </div>
+
+      <div class="lane">
+        <h3 class="lane-title">// MANUAL</h3>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Platform</th><th>Arch</th><th>Asset</th></tr></thead>
+            <tbody>
+              <tr><td>Linux</td><td>amd64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-linux-amd64.tar.gz"><code>onet-linux-amd64.tar.gz</code></a></td></tr>
+              <tr><td>Linux</td><td>arm64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-linux-arm64.tar.gz"><code>onet-linux-arm64.tar.gz</code></a></td></tr>
+              <tr><td>Linux</td><td>armv7</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-linux-arm-armv7.tar.gz"><code>onet-linux-arm-armv7.tar.gz</code></a></td></tr>
+              <tr><td>macOS</td><td>amd64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-darwin-amd64.tar.gz"><code>onet-darwin-amd64.tar.gz</code></a></td></tr>
+              <tr><td>macOS</td><td>arm64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-darwin-arm64.tar.gz"><code>onet-darwin-arm64.tar.gz</code></a></td></tr>
+              <tr><td>FreeBSD</td><td>amd64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-freebsd-amd64.tar.gz"><code>onet-freebsd-amd64.tar.gz</code></a></td></tr>
+              <tr><td>Windows</td><td>amd64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-windows-amd64.zip"><code>onet-windows-amd64.zip</code></a></td></tr>
+              <tr><td>Windows</td><td>arm64</td><td><a href="https://github.com/katriyda/onet/releases/latest/download/onet-windows-arm64.zip"><code>onet-windows-arm64.zip</code></a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="fine">SHA256 sums: <a href="https://github.com/katriyda/onet/releases/latest/download/checksums.txt"><code>checksums.txt</code></a>. Archives contain the binary, README, and config.example.json. No installer, no dependencies.</p>
+      </div>
+
+      <div class="lane">
+        <h3 class="lane-title">// SOURCE</h3>
+        <pre data-copy>git clone https://github.com/katriyda/onet.git
+cd onet
+go build -o onet .
+./onet</pre>
+        <p class="fine">Go 1.26+. The frontend is embedded at build time; there is no npm step.</p>
+      </div>
+
+      <p class="callout">onet listens on http://127.0.0.1:7681. Before exposing it beyond loopback, set a token — see <a href="#security">05 // SECURITY</a>.</p>
+    </div>
+  </section>
+
+  <section id="interface" class="section">
+    <div class="wrap">
+      <h2><span class="num">03 //</span> INTERFACE</h2>
+      <p class="section-intro">Touch gets a key bar. Mouse gets tabs.</p>
+
+      <div class="split">
+        <figure class="phone">
+          <img src="assets/mobile.png" width="390" height="844" alt="onet mobile UI: key bar below a terminal session">
+          <figcaption>Mobile · 390 × 844</figcaption>
+        </figure>
+        <div class="lists">
+          <div>
+            <h3 class="list-title">MOBILE</h3>
+            <ul>
+              <li>Key bar: ESC, TAB, CTRL, ALT, ^C, ENTER, arrows, PgUp, PgDn. Contents come from extra_keys.</li>
+              <li>Swipe from the left edge for sessions; long-press to select a line, then drag to extend.</li>
+              <li>Drag inside full-screen TUIs (omp, less, vim) is translated to wheel or arrow input.</li>
+              <li>Pinch to change font size; the layout follows visualViewport when the keyboard opens.</li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="list-title">DESKTOP</h3>
+            <ul>
+              <li>One tab per session. Ctrl+Shift+C/V/N/W; Ctrl+wheel zoom.</li>
+              <li>Right-click and the ⋯ menu open the same action sheet as mobile.</li>
+              <li>?s=&lt;name&gt; deep-links into a session; ⌨ toggles the touch key bar.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="config" class="section">
+    <div class="wrap">
+      <h2><span class="num">04 //</span> CONFIG</h2>
+      <p class="section-intro">config.json is optional and lives next to the binary; -config points elsewhere.</p>
+
+      <div class="copy-wrap"><pre data-copy>{
+  "host": "127.0.0.1",
+  "port": 7681,
+  "token": "",
+  "shell": "",
+  "cwd": "",
+  "scrollback": 5000,
+  "font_size": 15,
+  "ui": "auto",
+  "extra_keys": ["ESC", "TAB", "CTRL", "ALT", "^C", "ENTER", "←", "↑", "↓", "→", "PGUP", "PGDN"],
+  "log_file": "onet.log",
+  "log_level": "info",
+  "log_max_size_mb": 20,
+  "log_max_backups": 5,
+  "log_terminal_io": false,
+  "allow_insecure": false
+}</pre></div>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>ui</code></td><td><code>auto</code> follows the input device; <code>mobile</code> / <code>desktop</code> force a layout</td></tr>
+            <tr><td><code>token</code></td><td>Enables auth on <code>/config</code>, <code>/logs</code>, <code>/update</code>, <code>/ws</code></td></tr>
+            <tr><td><code>extra_keys</code></td><td>Touch key bar contents</td></tr>
+            <tr><td><code>log_terminal_io</code></td><td>Logs raw PTY I/O; off by default</td></tr>
+            <tr><td><code>allow_insecure</code></td><td>Permits non-loopback with an empty token; emergency use only</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><a href="https://github.com/katriyda/onet#配置">Full configuration reference →</a></p>
+    </div>
+  </section>
+
+  <section id="security" class="section">
+    <div class="wrap">
+      <h2><span class="num">05 //</span> SECURITY</h2>
+      <p class="section-intro">This is a shell, not a dashboard.</p>
+
+      <ol class="sec-list">
+        <li><strong>Loopback by default.</strong> onet listens on 127.0.0.1:7681 with no authentication.</li>
+        <li><strong>Public bind without a token is refused.</strong> A non-loopback host with an empty token stops at startup. <code>allow_insecure: true</code> is the explicit override and logs a warning.</li>
+        <li><strong>A token is a shell.</strong> It protects <code>/config</code>, <code>/logs</code>, <code>/update</code>, and <code>/ws</code>. Anyone holding it has a shell on the machine.</li>
+      </ol>
+
+      <p class="section-note">Transport is plain HTTP. Terminate TLS in Caddy or nginx, or use Tailscale Serve. POST <code>/update</code> additionally requires the same-origin header <code>X-Onet-Update: 1</code> to block CSRF.</p>
+    </div>
+  </section>
+
+  <section id="updates" class="section">
+    <div class="wrap">
+      <h2><span class="num">06 //</span> UPDATES</h2>
+
+      <div class="copy-wrap"><pre data-copy>onet version
+onet update -check
+onet update</pre></div>
+
+      <p>The CLI replaces the binary and exits; restart onet to apply it.</p>
+      <p>In the web UI: ⋯ → 检查更新 → 安装 vX 并重启. The new process inherits PTY handles and the replay buffer; pages reconnect in about a second. If the new binary fails to start, the old process keeps serving.</p>
+      <p class="fine">Version checks use the GitHub Releases API (60 requests/hour anonymous). Set GITHUB_TOKEN or GH_TOKEN to raise the limit, or HTTPS_PROXY in restricted networks.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-foot">
+  <div class="wrap foot-inner">
+    <p>© <span data-year>2026</span> onet · MIT</p>
+    <nav aria-label="Footer">
+      <a href="https://github.com/katriyda/onet">GitHub</a>
+      <a href="https://github.com/katriyda/onet/releases">Releases</a>
+      <a href="https://github.com/katriyda/onet/blob/main/README.md">README</a>
+      <a href="https://github.com/katriyda/onet/blob/main/LICENSE">LICENSE</a>
+      <a href="install.sh">install.sh</a>
+      <a href="install.ps1">install.ps1</a>
+    </nav>
+  </div>
+  <p class="wrap foot-cmd">$ echo done<span class="cursor" aria-hidden="true">▌</span></p>
+</footer>
+
+</body>
+</html>

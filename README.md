@@ -1,5 +1,7 @@
 # onet
 
+官网：<https://katriyda.github.io/onet/>
+
 移动端优先的 Web 终端，tmux 风格会话管理：多会话、关页不杀进程、断线重连（detach/reattach）。
 
 单文件 Go 二进制（前端全部内嵌），可选 JSON 配置文件，零第三方运行时依赖。

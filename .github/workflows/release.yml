@@ -58,6 +58,9 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: Generate checksums
+        working-directory: out
+        run: sha256sum onet-* > checksums.txt
       - uses: softprops/action-gh-release@v3
         with:
           files: out/*
