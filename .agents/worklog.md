@@ -281,3 +281,19 @@
 - 产出: web/app.js、web/index.html（v=36）、README.md、AGENTS.md；提交 532393f；tag/Release v0.5.10
 - 结果: 完成并热更新到 0.5.10（`/healthz version=0.5.10`，页面 `app.js?v=36`）。真机 18:5x 仍在跑 v=35，需刷新一次（`/` 已 no-store，刷新即生效）；刷新后日志应出现 `client.boot ... app=36` 与 `client.vp.hold ... rows=60`
 - meta: commit=532393f tag=v0.5.10 files=web/app.js,web/index.html,README.md,AGENTS.md
+
+## 2026-10-25 19:20 — 与 omp 无关的第二下：浏览器为露光标滚动了 #term-wrap
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户反馈“不用 omp 也会出现”，说明第二下位移不是应用 SIGWINCH，而是更底层的东西
+- 做了什么:
+  - 复查候选：“键盘弹起时浏览器为了让 xterm 的光标可见，会滚动最近的可滚动祖先”。`#term-wrap` 原来只有 `overflow: hidden`——**hidden 仍然是可编程滚动容器**，它的内容（冻结后 562px 高的 `#term`）比 wrap（266px）高，所以浏览器能把它 scrollTop 滚到 ~290，整块终端被顶走，再叠加自己的平移就是“内容滚一下/两下”，和前台跑什么应用无关
+  - 复现：headless 里在冻结态执行 `wrap.scrollTop = 250` → 修复前 sc=250（终端整体位移），改成 `overflow: clip` 后 sc 恒为 0
+  - `web/style.css`：`#term-wrap`/`#term` 改 `overflow: hidden; overflow: clip;`（clip 禁止一切滚动）
+  - `web/app.js`：`initTerm` 给 wrap 挂 scroll 兜底（一旦被滚立即归零，并记 `client.vp.wrapscroll sc=NNN`，800ms 节流）；`client.vp.settle`/`client.vp.hold` 增加 `wsc=`（wrap scrollTop）、`vvt=`（visualViewport.offsetTop）两个诊断字段
+  - AGENTS 记录“必须 clip 不能 hidden”的不变量
+- 产出: web/style.css（v=13）、web/app.js（v=37）、web/index.html、AGENTS.md；提交 137ccff；tag/Release v0.5.11
+- 结果: 完成并热更新到 0.5.11（`/healthz version=0.5.11`，页面 `app.js?v=37 style.css?v=13`）。隔离实例验证：`getComputedStyle(wrap).overflowY === 'clip'`、强制 `scrollTop=250` 无效、hold 前后 `rows/sh/sc` 不变、收起后内联样式清空、日志 `vp.hold vvh=420 vvt=0 rows=62 wsc=0 pan=1 off=-290 n=1 dt=193 v=37`
+  - 下一步：真机刷新后复测（普通 shell 与 omp 各一次）；日志里 `wsc`/`vvt` 应恒为 0 且无 `client.vp.wrapscroll`。若仍有两下，改看这两个字段与 `top=`（视觉视口是否被浏览器平移）
+- meta: commit=137ccff tag=v0.5.11 files=web/style.css,web/app.js,web/index.html,AGENTS.md
