@@ -266,3 +266,18 @@
 
 
 
+
+## 2026-10-25 19:10 — 键盘期间不再 resize PTY（修掉 omp 的第二次重绘）
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户“新链接还是有问题”——定位 v0.5.9（真机已确认 app=35）为何仍有第二下跳动
+- 做了什么:
+  - 真机日志定位：18:54 的 settle 是 `pan=1 alt=0 dt=216 force=1`（代码路径正确），但提交后 `client.vp.anchor` 立刻变成 `sh=266 rows=29`（提交前 `sh=46420`）→ **omp 收到 SIGWINCH 会清屏重排整个会话**；平移做得再准，提交那一下也会被应用自己重画，观感就是“两下”
+  - 决定：普通滚动缓冲区（`!isAltBuffer()`）键盘期间**完全不 resize PTY**，只冻结行数 + 平移（`vpHold`）；应用收不到 SIGWINCH → 不重绘。alt（less/vim）保持原逻辑（冻结行数、unpan、settle 后 fit+resize），宽度变化（旋转/分屏）用 `vpFrozenW` 守卫强制重排；键盘收起时 `panStep` 把位移滑回 0 再解除冻结（位移/高度都已归位，无视觉变化）
+  - 日志新增 `client.vp.hold`（`rows` 应等于键盘前的行数，`off`/`n`/`dt`/`v` 同 settle）
+  - 验证：隔离实例 + 自写“resize 时清屏重印”的 node 程序（`tmp/resizeapp.js`）：冻结尾帧 `-290px`、hold 后 `rows/sh/sc` 完全不变、收起后内联样式清空、**全程 0 条 `cmd":"resize"`**；alt 路径（less）仍为 `pan=false hold=false` → `settle alt=1 rows=30` + 一条 resize；桌面（非 coarse）仍逐帧 fit（rows 30→61 多档）
+  - 线上 omp 实测（390×710→420）：`sh=45556 → 45556`、`rows=62 → 62`、无 resize 命令（v0.5.9 同场景 `sh` 会塌成 556）
+- 产出: web/app.js、web/index.html（v=36）、README.md、AGENTS.md；提交 532393f；tag/Release v0.5.10
+- 结果: 完成并热更新到 0.5.10（`/healthz version=0.5.10`，页面 `app.js?v=36`）。真机 18:5x 仍在跑 v=35，需刷新一次（`/` 已 no-store，刷新即生效）；刷新后日志应出现 `client.boot ... app=36` 与 `client.vp.hold ... rows=60`
+- meta: commit=532393f tag=v0.5.10 files=web/app.js,web/index.html,README.md,AGENTS.md
