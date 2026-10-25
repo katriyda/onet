@@ -144,3 +144,24 @@
 - 产出: web/app.js、web/style.css、web/index.html、AGENTS.md、README.md；提交 6e830aa；tag/Release v0.5.2
 - 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 390×700（init script 强制 coarse pointer）逐项验证：app `position:fixed`/`top=0px`/`sy=0`/高度=vvh；短缓冲区冻结不平移、重排 1 次、光标 top 不变；满缓冲区冻结 transform 逐帧 -20…-200 且光标与可视区底边间距恒定 4px，提交后 screenH 544→340 仅变 1 次、atBottom；底部意图回归（合成 tap 后把 scrollTop 抬 40px）→ 冻结 `intent=true pan=true`、提交 `bottom=1 force=1 pan=1` 且锚回底部、浮标隐藏；上滑 120px 后 tap 再缩键盘保持 `atBottom=false` 且浮标可见；细指针页不冻结、逐帧重排；桌面 1280×800 布局与输入正常。日志确认 `client.vp.settle ... bottom=1 force=1 sy=0`、`client.vp.anchor bottom=1`。A 实例 `/healthz` 为 `version=0.5.2,resumed=true`，部署页引用 `app.js?v=28`。真机需强制刷新一次复验键盘行为（Android 日志 `vvh/ih` 若在键盘弹起时不变 = 宿主 `adjustPan`，web 层无解）
 - meta: commit=6e830aa tag=v0.5.2 files=web/app.js,web/style.css,web/index.html,AGENTS.md,README.md
+
+
+## 2026-10-25 16:43 — 全屏 TUI（alternate screen）不再平移视口
+- session: s-20261025-altpan
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 修掉软键盘弹起/收起时全屏 TUI（omp/less/vim）里的“滚动两下”：内容先上滑再被应用重绘拉回
+- 做了什么:
+  - 定位：alt 缓冲没有回滚区（`scrollHeight == clientHeight`），冻结期间的 `translate3d` 平移量在提交后无法被 `scrollToBottom()` 补偿；提交时 xterm 按新行数裁掉顶部，应用收到 SIGWINCH 再整屏重绘回自己的视图 → 上移 `rowsOld - rowsNew` 行再下移同样行数
+  - `web/app.js` `syncViewport()` 冻结分支：`vpPan = !isAltBuffer() && (canAnchorBottom() || (bottomIntent && bufferFillsScreen()))`，附原因注释；普通缓冲区平移机制保持不变
+  - `commitViewport()` 的 `client.vp.settle` 增加 `alt=0/1` 标记，便于真机判定走了哪条分支
+  - `web/index.html` 升到 `app.js?v=29`；README 移动端「键盘弹起/收起」与 AGENTS 前端坑各补一条（alt 不能平移的不变量）
+- 产出: web/app.js、web/index.html、README.md、AGENTS.md；提交 0a30b50；tag/Release v0.5.3
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 390×710（CDP touch emulation 得到 `(pointer: coarse)`）：
+  - A `less` 全屏：710→420 的 189 帧里 `#term` transform 恒为空、冻结高度 `562px`、rows 62→30、`ch=266`，`client.vp.settle pan=0 alt=1 bottom=1`；+150ms 顶行为空（应用重绘中），+700ms 顶行回到 `document.body.appendChild(a);`（与起始一致）；420→710 同样 transform 恒空、rows 30→62、`pan=0 alt=1`
+  - B 普通缓冲区（80 行 + 提示符，atBottom）：26 帧带 `translate3d(0,-290px,0)`、冻结期 rows 恒 62、提交后 `sc=459=sh-ch`（atBottom），`pan=1 alt=0 bottom=1`，平移末帧与提交后可见内容一致（差 2px，属 fit 延后同步）
+  - C 细指针页（无 touch 模拟）11 步 710→420：无内联高度/transform，rows 58→30 逐帧变化
+  - 发布：`gh run watch` CI/Release 绿，9 个资产；`POST /update` 将 A 实例 0.5.2→0.5.3（`updated=true`，`/healthz` `version=0.5.3,resumed=true`，`handoff.restored sessions=1`，`onet.exe` 已换新，页面引用 `app.js?v=29`）
+  - 真机需强刷一次：TUI 会话里弹起/收起键盘应看到 `client.vp.settle ... alt=1 pan=0`
+- meta: commit=0a30b50 tag=v0.5.3 files=web/app.js,web/index.html,README.md,AGENTS.md
+
