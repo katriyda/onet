@@ -579,11 +579,24 @@ function syncViewport(smooth) {
   const h = viewportHeight();
   if (!term || !fit) { termHeight = h; return; }
 
+  // 可视区变大 = 键盘收起。冻结的网格比窗口矮，平移会在顶部/底部露出一块空白，
+  // 所以这个方向不冻结：直接 fit，多出来的行从回滚区补上，底边继续跟着键盘。
+  const growing = h > termHeight;
+  if (vpFrozenH && growing) { commitViewport(); return; }  // 冻结中途键盘又收起：先按当前尺寸收尾
+
   if (!vpFrozenH) {
     // 只有触屏设备（软键盘）走平滑路径；鼠标拖拽窗口保持逐帧 fit。
     if (!smooth || !coarsePointer.matches || !termHeight || h === termHeight) {
       termHeight = h;
       fitTerm();
+      return;
+    }
+    if (growing) {
+      const atBottom = bottomIntentWanted() || bufferAtBottom();
+      termHeight = h;
+      fitTerm();
+      if (atBottom) { term.scrollToBottom(); settleAnchorBottom(); }
+      else updateScrollPill();
       return;
     }
     vpFrozenH = termHeight;
