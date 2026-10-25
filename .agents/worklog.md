@@ -112,3 +112,18 @@
 - 结果: 完成。`go vet`、`go test`、Windows/Linux/darwin 构建通过；首次启动实测生成 43 字符 token 且 `/config` 未认证 401；Chromium 桌面/390×844 移动端设置面板；UI 改字号+改端口 8766→8770 保存并重启，`handoff.restored sessions=1`、旧端口关闭、新端口服务、会话保留；UI 轮换 token 后旧 token 401/新 token 200。提交 2386b87，CI 绿；tag v0.5.0 Release（曾误发 v0.4.0，已撤回 tag 与 Release）；通过 `POST /update` 将 A 部署实例 0.3.1→0.5.0，`resumed=true`、1 个会话保留。注意：A 的既有 `config.json` 未改（仍 0.0.0.0 / 无 token / allow_insecure=true），安全默认只作用于新生成配置
 - meta: commit=2386b87 tag=v0.5.0 files=config.go,config_web.go,config_test.go,main.go,server.go,handoff.go,handoff_unix.go,handoff_test.go,update_web.go,update_test.go,web/index.html,web/app.js,web/style.css,README.md,AGENTS.md,docs/site/index.html,.github/workflows/release.yml,.agents/worklog.md
 
+## 2026-10-25 15:39 — 移动端软键盘弹起/收起：冻结行数 + 底边跟随
+- session: s-20261025-vpresize
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 消除移动端软键盘打开/关闭时终端逐行重排、底部跳动和 resize 风暴，让键盘动画期间内容连续跟随、手感稳定
+- 做了什么:
+  - 复现定位：`layout()` 在每个 `visualViewport` resize 帧都 `fit.fit()`，xterm 每跨一个字符高度 reflow 一次，并把中间 cols/rows 发给 ConPTY（shell 重绘），观感就是“卡一下跳一行”
+  - `web/app.js` 新增冻结/提交状态机（`syncViewport`/`commitViewport`/`endViewportFreeze`）：高度变化期间用内联高度冻结 `#term` 行数，`translate3d` 让底边贴住 `#term-wrap` 底边；稳定 `VP_SETTLE_MS=140ms` 后一次性 fit；`fitTerm`/`sendResize` 冻结期间早退
+  - 逐帧小步长（≤48px）直接贴住、无跟随滞后；视口一次性大跳变用 rAF 缓动（`VP_EASE=0.5`）；用 `(pointer: coarse)` 判定触屏，鼠标拖拽窗口保持逐帧 fit
+  - 短缓冲区（`baseY=0` 且光标不在末行）或已滚回历史时不平移、只冻结行数，避免把顶部提示符推出屏幕；用 `buffer.viewportY/baseY` 判断底部，规避容器缩小后像素级 `atBottom()` 误判
+  - 键盘关闭同样锚底，提交后按底部状态 `scrollToBottom`；字号变化前先结束冻结；同步 app.js?v=27 与 README/AGENTS/docs 站点说明
+- 产出: web/app.js、web/index.html、AGENTS.md、README.md、docs/site/index.html；提交 d595435
+- 结果: 完成。`go vet`/`go test`/`go build` 通过；隔离实例 7682 + Chromium 移动视口逐帧模拟（390×700→500，20px/帧）：冻结 70 帧内 xterm 高度恒定、屏幕仅重排 1 次、光标位移与可视区底边位移一致（-180/-180），PTY 每方向只收到 1 条 resize（31↔19）；短缓冲区光标零位移、无重排；细指针路径无冻结、逐帧重排；已推送 main（CI/Pages 运行中）。运行中的 A 实例（7681）仍是 v0.5.0，需更新二进制或走 `/update` 后才生效；真机 IME/键盘动画需用户复验
+- meta: commit=d595435 files=web/app.js,web/index.html,AGENTS.md,README.md,docs/site/index.html
+
