@@ -312,6 +312,6 @@
   - 移动端 attach 带 `max_replay_bytes=128KB`；Go 端 `Session.Attach` 仅在全量重放时从 ring 尾部截取（续传完整），`attached.capped=true` 时不发“历史已截断”notice，客户端也不弹断线 toast；cap 上限 `replayMaxBytes`
   - `session_replay_test.go` 新增截断/单帧超限用例；`index.html` 递增 `app.js?v=39`
 - 产出: session.go、server.go、session_replay_test.go、web/app.js、web/index.html、README.md、AGENTS.md
-- 结果: 完成（应用侧缓解 + 诊断）。`go vet`/`go test`/`go build` 通过；WS 实测 319KB 全量 → capped 130KB/85 帧，带 `since_seq` 的续传即使 `max_replay_bytes=1KB` 仍返回完整 129KB 且 `resumed=true`；Chromium 移动仿真 v39 日志 `max_replay=131072 capped=true`、无断线 toast、无 console error；页面冻结 31s 恢复后无 stale/close，shell 回显正常
+- 结果: 完成并发布 v0.5.12（commit 19f16d4，tag v0.5.12）。`go vet`/`go test`/`go build` 通过；WS 实测 319KB 全量 → capped 130KB/85 帧，带 `since_seq` 的续传即使 `max_replay_bytes=1KB` 仍返回完整 129KB 且 `resumed=true`；Chromium 移动仿真 v39 日志 `max_replay=131072 capped=true`、无断线 toast、无 console error；页面冻结 31s 恢复后无 stale/close，shell 回显正常。GitHub CI 与 Release 均绿；9 个资产 + checksums，Windows amd64 资产 SHA-256 `478f02a4…1d66`，二进制 `version` 输出 `0.5.12`，内嵌 `app.js?v=39`/`max_replay_bytes`/`client.ws.backlog`
 - 备注: 安卓侧 1.4–5s 的发送延迟仍可能是 Wi-Fi/VPN/代理或渲染停顿；下次复现看 `client.ws.backlog` 的 `age_ms/buffered/conn` 与 `client.ws.stale` 的 `tick_gap_ms`。若 backlog 持续增长而页面可见，优先查手机 Wi-Fi 省电/VPN/代理与 AP 信号
-- meta: files=session.go,server.go,session_replay_test.go,web/app.js,web/index.html,README.md,AGENTS.md
+- meta: commit=19f16d4 tag=v0.5.12 files=session.go,server.go,session_replay_test.go,web/app.js,web/index.html,README.md,AGENTS.md
