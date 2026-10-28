@@ -297,3 +297,21 @@
 - 结果: 完成并热更新到 0.5.11（`/healthz version=0.5.11`，页面 `app.js?v=37 style.css?v=13`）。隔离实例验证：`getComputedStyle(wrap).overflowY === 'clip'`、强制 `scrollTop=250` 无效、hold 前后 `rows/sh/sc` 不变、收起后内联样式清空、日志 `vp.hold vvh=420 vvt=0 rows=62 wsc=0 pan=1 off=-290 n=1 dt=193 v=37`
   - 下一步：真机刷新后复测（普通 shell 与 omp 各一次）；日志里 `wsc`/`vvt` 应恒为 0 且无 `client.vp.wrapscroll`。若仍有两下，改看这两个字段与 `top=`（视觉视口是否被浏览器平移）
 - meta: commit=137ccff tag=v0.5.11 files=web/style.css,web/app.js,web/index.html,AGENTS.md
+
+## 2026-10-28 01:52 — 安卓同网卡顿：回放积压 + 心跳误杀，服务端并非 0ms 瓶颈
+- session: s-20261028-android-net
+- agent: omp (deepseek-v4.1-flash-fast)
+- 目录: C:\Users\katri\code\onet
+- 目标: 用户报安卓设备在同一网络下打开 onet 加载很久、很卡，完全没有排查方向
+- 做了什么:
+  - 对照 `C:\Users\katri\A\onet-windows-amd64\onet.log`：Android 的 `/`、`/config` 均为 0–1ms；WS 握手正常；但 01:16 的会话 attach 后出现 300+ 帧 / 360KB 待写、15s `write_stalled`（c133–c135），同一时刻 `client.boot → vp.anchor` 仅 0.3s，说明不是服务端处理慢
+  - 日志批次在客户端生成后 1.4–5s 才到服务端（c137/c138），且服务端 200KB 假日志批次的 pong 只延迟 22ms，排除服务端日志阻塞；延迟落在安卓侧的 WS 发送路径/链路（Wi-Fi、VPN/代理或渲染 stall）
+  - 320KB 全量 replay 是放大器：首开、切会话、断线重连都会重放；慢客户端 1013 后重连再重放。会话本身已 `truncated=true`（320KB ring 上限）
+  - 心跳 20s/25s 是第二个放大器：Android Chrome 后台/主线程繁忙时定时器被节流，恢复后直接用 `idle>25s` 判死，日志里 100+ 次 `client.ws.stale`（idle 25s–14min）→ 健康连接被关 → 重连 → 重放
+  - `web/app.js`：只有页面 visible 且本次 tick 间隔未漂移才判 stale；超时放宽到 45s；`visibilitychange` 到 visible 重置基线；`ws.open` 带 `navigator.connection`，新增 `client.ws.backlog`（age_ms/buffered/queued/conn）
+  - 移动端 attach 带 `max_replay_bytes=128KB`；Go 端 `Session.Attach` 仅在全量重放时从 ring 尾部截取（续传完整），`attached.capped=true` 时不发“历史已截断”notice，客户端也不弹断线 toast；cap 上限 `replayMaxBytes`
+  - `session_replay_test.go` 新增截断/单帧超限用例；`index.html` 递增 `app.js?v=39`
+- 产出: session.go、server.go、session_replay_test.go、web/app.js、web/index.html、README.md、AGENTS.md
+- 结果: 完成（应用侧缓解 + 诊断）。`go vet`/`go test`/`go build` 通过；WS 实测 319KB 全量 → capped 130KB/85 帧，带 `since_seq` 的续传即使 `max_replay_bytes=1KB` 仍返回完整 129KB 且 `resumed=true`；Chromium 移动仿真 v39 日志 `max_replay=131072 capped=true`、无断线 toast、无 console error；页面冻结 31s 恢复后无 stale/close，shell 回显正常
+- 备注: 安卓侧 1.4–5s 的发送延迟仍可能是 Wi-Fi/VPN/代理或渲染停顿；下次复现看 `client.ws.backlog` 的 `age_ms/buffered/conn` 与 `client.ws.stale` 的 `tick_gap_ms`。若 backlog 持续增长而页面可见，优先查手机 Wi-Fi 省电/VPN/代理与 AP 信号
+- meta: files=session.go,server.go,session_replay_test.go,web/app.js,web/index.html,README.md,AGENTS.md

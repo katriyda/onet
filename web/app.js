@@ -48,6 +48,7 @@ let serverCaps = {};           // hello.capabilities；旧服务端为空对象
 let lastSessionId = '';
 let heartbeatTimer = null;
 let lastServerMessageAt = 0;
+let lastHeartbeatTickAt = 0;
 let lastMissingTargetId = '';  // 避免同一缺失目标重复提示
 
 // 交互阈值（手势/长按/点按统一，别再各写一套）
@@ -55,7 +56,16 @@ const LONG_PRESS_MS = 450;
 const TAP_SLOP = 10;
 const REPEAT_INTERVAL_MS = 80;
 const HEARTBEAT_MS = 20000;
-const HEARTBEAT_TIMEOUT_MS = 25000;
+// 服务端正常会在收到 ping 后立即回 pong；留两个心跳周期的余量，避免 Wi-Fi
+// 抖动/主线程繁忙时把健康连接误判为死连接。
+const HEARTBEAT_TIMEOUT_MS = 45000;
+// 计时器实际间隔超过该值 = 标签页被挂起/节流过，这一次不能用来判死连接。
+const HEARTBEAT_DRIFT_MS = HEARTBEAT_MS * 1.5;
+
+// 移动端首次 attach 只回放最近 128KB：手机解析/渲染整段 320KB 历史会卡住
+// 数秒，期间服务端写入队列堆积还会被判定为慢客户端。续传（since_seq）不受限，
+// 保证不丢帧；桌面端仍回放完整 ring。
+const MOBILE_REPLAY_BYTES = 128 * 1024;
 
 // 异步操作状态：失败/超时都要解锁，避免 UI 永久禁用
 let creating = false;
@@ -154,6 +164,7 @@ const nativeConsole = {
 
 let logFlushTimer = null;
 let logPersistTimer = null;
+let lastBacklogLogAt = 0;
 let serverConnId = ''; // 当前 WS 连接标识（服务端 hello 帧回传）
 
 function truncateLog(s, max) {
@@ -228,6 +239,17 @@ function flushClientLogs() {
   }
   if (!batch.length) return;
 
+  // 日志批次在队列里等了超过 2s：说明 WS 发送方向被网络/主线程阻塞过。
+  // 仅在页面可见时记录（后台标签页的计时器本来就会被节流）。
+  const age = Date.now() - batch[0].ts;
+  if (age > 2000 && document.visibilityState === 'visible' &&
+      Date.now() - lastBacklogLogAt > 5000) {
+    lastBacklogLogAt = Date.now();
+    logEvent('warn', 'client.ws.backlog',
+      'age_ms=' + age + ' buffered=' + (ws.bufferedAmount || 0) +
+      ' queued=' + logQueue.length + ' ' + connectionInfo());
+  }
+
   try {
     ws.send(new TextEncoder().encode(JSON.stringify({ type: 'log', client: clientId, entries: batch })));
   } catch {
@@ -249,6 +271,16 @@ function safeLocation() {
   }
   const qs = params.toString();
   return location.pathname + (qs ? '?' + qs : '');
+}
+
+// 浏览器网络提示（Chrome/Android 支持 NetworkInformation；不支持时返回 unknown）。
+function connectionInfo() {
+  const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!c) return 'conn=unknown';
+  return 'conn=' + (c.effectiveType || '?') +
+    ' rtt=' + (c.rtt == null ? '?' : c.rtt) +
+    ' downlink=' + (c.downlink == null ? '?' : c.downlink) +
+    ' saveData=' + (c.saveData ? 1 : 0);
 }
 
 function serializeLogArg(a) {
@@ -307,6 +339,11 @@ function installLogHooks() {
   window.addEventListener('offline', () => logEvent('warn', 'client.network', 'offline'));
   document.addEventListener('visibilitychange', () => {
     logEvent('debug', 'client.visibility', document.visibilityState);
+    if (document.visibilityState === 'visible') {
+      // 后台期间计时器不运行，恢复时先重置基线，避免把挂起时长当成网络空闲。
+      lastServerMessageAt = Date.now();
+      lastHeartbeatTickAt = Date.now();
+    }
     if (document.visibilityState === 'hidden') {
       flushClientLogs();
       persistLogQueue();
@@ -1486,11 +1523,24 @@ function startHeartbeat() {
   stopHeartbeat();
   if (serverCaps.ping !== true) return;
   lastServerMessageAt = Date.now();
+  lastHeartbeatTickAt = Date.now();
   heartbeatTimer = setInterval(() => {
     if (!ws || ws.readyState !== 1) return;
-    // 服务端 20s 无任何帧（含 pong/list/output）视为假连接，主动重连。
-    if (Date.now() - lastServerMessageAt > HEARTBEAT_TIMEOUT_MS) {
-      logEvent('warn', 'client.ws.stale', 'idle_ms=' + (Date.now() - lastServerMessageAt));
+    const now = Date.now();
+    const tickGap = now - lastHeartbeatTickAt;
+    lastHeartbeatTickAt = now;
+    // 后台标签页的定时器会被 Chrome 节流到分钟级；恢复时这一次计时不可信。
+    // 同理，主线程被 xterm 回放/渲染长时间占用时也不应判死连接。
+    if (document.visibilityState !== 'visible' || tickGap > HEARTBEAT_DRIFT_MS) {
+      lastServerMessageAt = now;
+      logEvent('debug', 'client.ws.heartbeat_skip',
+        'visibility=' + document.visibilityState + ' tick_gap_ms=' + tickGap);
+      return;
+    }
+    // 服务端 45s 无任何帧（含 pong/list/output）才视为假连接。
+    if (now - lastServerMessageAt > HEARTBEAT_TIMEOUT_MS) {
+      logEvent('warn', 'client.ws.stale',
+        'idle_ms=' + (now - lastServerMessageAt) + ' tick_gap_ms=' + tickGap);
       ws.close();
       return;
     }
@@ -1514,7 +1564,8 @@ function connectWS() {
     stopHeartbeat();
     clearTimeout(stableTimer);
     stableTimer = setTimeout(() => { reconnectDelay = 1000; }, 5000);
-    logEvent('info', 'client.ws.open', 'reconnected=' + reconnected + ' href=' + safeLocation());
+    logEvent('info', 'client.ws.open',
+      'reconnected=' + reconnected + ' ' + connectionInfo() + ' href=' + safeLocation());
     if (disconnected) {
       disconnected = false;
       showToast('已重连', 1800, 'success');
@@ -1636,7 +1687,7 @@ function handleMsg(buf) {
       pendingAttach = null;
       logEvent('info', 'client.attach.ok',
         'id=' + msg.id + ' resumed=' + !!msg.resumed + ' truncated=' + !!msg.truncated +
-        ' seq=' + msg.seq);
+        ' capped=' + !!msg.capped + ' seq=' + msg.seq);
       const s = findSession(msg.id);
       current = { id: msg.id, name: s ? (s.name || s.id) : msg.id };
       if (msg.truncated) {
@@ -1644,7 +1695,12 @@ function handleMsg(buf) {
         SESSION_SEQ.delete(msg.id);
         if (term) { term.reset(); term.write('\r\n\x1b[0m'); }
         early.length = 0;
-        showToast('连接中断，历史已截断', 5000, 'warn');
+        if (msg.capped) {
+          // 移动端主动限制的回放长度，不是断线丢失，不要吓用户。
+          logEvent('info', 'client.attach.capped', 'id=' + msg.id + ' from=' + msg.from_seq);
+        } else {
+          showToast('连接中断，历史已截断', 5000, 'warn');
+        }
       } else if (!msg.resumed) {
         // 服务端做了完整重放（或旧服务端）：序号可能从头开始，必须丢弃旧 seq。
         SESSION_SEQ.delete(msg.id);
@@ -1904,6 +1960,9 @@ function attachTo(id, { resume = false } = {}) {
   updateScrollPill();
   const cmd = { type: 'attach', id, cols: term.cols, rows: term.rows };
   if (canResume) cmd.since_seq = pendingAttach.sinceSeq;
+  // 移动端始终带上全量回放上限：服务端只在无法续传、退回全量重放时生效。
+  // 这样即使本地有 seq、但服务端 ring 已丢弃该段，也不会一次塞回 320KB。
+  if (mode === 'mobile') cmd.max_replay_bytes = MOBILE_REPLAY_BYTES;
   sendCmd(cmd);
   if (mode === 'desktop' && term) term.focus();
 }

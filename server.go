@@ -466,14 +466,15 @@ func cmdErr(client *Client, cmd, msg string) []byte {
 // handleCommand 处理一条二进制 JSON 命令，返回需要回复的帧（可为 nil）。
 func (s *Server) handleCommand(client *Client, attached **Session, data []byte) []byte {
 	var cmd struct {
-		Type     string           `json:"type"`
-		Name     string           `json:"name"`
-		ID       string           `json:"id"`
-		Cols     int              `json:"cols"`
-		Rows     int              `json:"rows"`
-		SinceSeq *uint64          `json:"since_seq"`
-		Client   string           `json:"client"`
-		Entries  []clientLogEntry `json:"entries"`
+		Type           string           `json:"type"`
+		Name           string           `json:"name"`
+		ID             string           `json:"id"`
+		Cols           int              `json:"cols"`
+		Rows           int              `json:"rows"`
+		SinceSeq       *uint64          `json:"since_seq"`
+		MaxReplayBytes int              `json:"max_replay_bytes"`
+		Client         string           `json:"client"`
+		Entries        []clientLogEntry `json:"entries"`
 	}
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		appLog.Warn("ws.bad_command", "conn", client.logID(), "bytes", len(data), "err", err)
@@ -529,7 +530,13 @@ func (s *Server) handleCommand(client *Client, attached **Session, data []byte) 
 		if *attached != nil && *attached != sess {
 			(*attached).Detach(client)
 		}
-		if err := sess.Attach(client, cmd.SinceSeq); err != nil {
+		maxReplay := cmd.MaxReplayBytes
+		if maxReplay < 0 {
+			maxReplay = 0
+		} else if maxReplay > replayMaxBytes {
+			maxReplay = replayMaxBytes
+		}
+		if err := sess.Attach(client, cmd.SinceSeq, maxReplay); err != nil {
 			return cmdErr(client, cmd.Type, "会话已退出")
 		}
 		// attach 携带客户端当前尺寸：首帧就不再是 80×24，也避免二次 reflow。
@@ -647,6 +654,7 @@ type attachedMsg struct {
 	Seq       uint64 `json:"seq"`
 	Resumed   bool   `json:"resumed"`
 	Truncated bool   `json:"truncated"`
+	Capped    bool   `json:"capped,omitempty"` // 客户端主动请求的移动端回放上限，不是断线丢失
 	FromSeq   uint64 `json:"from_seq"`
 }
 

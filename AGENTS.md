@@ -22,7 +22,8 @@
 - 长按/行选中用 `onPress()`；长按终端 = 选中整行，终端菜单在右上角 `⋯`，别再把长按改回弹菜单
 - **触屏手势必须挂在 `#touch-layer` 稳定层上**：xterm 6 的 DOM renderer 滚动时会 `replaceChildren` 替换行节点，直接监听 `.xterm`/行节点会在第一次 `touchmove` 后丢事件。不要给 `#touch-layer` 加 `pointer-events:none`
 - 普通缓冲区自己改 `viewport.scrollTop`（像素级 + 惯性）；**alternate screen / 鼠标上报时必须把拖拽翻译成 `WheelEvent`**，交给 xterm 转成 ↑/↓ 或 SGR wheel，否则 omp/less/vim 里拖不动
-- 服务端 attach 时**先发 `attached`（带 seq/resumed/truncated/from_seq），再发回放 `output`**；客户端用 `hello.capabilities.attachOrder === "attached-first"` 判定，新协议按 `since_seq` 续传，旧服务端则把先到的 output 缓存进 `pendingAttach.early` 等 attached 后补写。重连前不再无条件 `term.reset()`：只有 `resumed=false` 或 `truncated=true` 才清屏，短断线保留滚动位置。改协议时同步维护 capability，否则回滚会重复写屏
+- 服务端 attach 时**先发 `attached`（带 seq/resumed/truncated/capped/from_seq），再发回放 `output`**；客户端用 `hello.capabilities.attachOrder === "attached-first"` 判定，新协议按 `since_seq` 续传，旧服务端则把先到的 output 缓存进 `pendingAttach.early` 等 attached 后补写。重连前不再无条件 `term.reset()`：只有 `resumed=false` 或 `truncated=true` 才清屏，短断线保留滚动位置。移动端 attach 带 `max_replay_bytes=128KB`，服务端只在无法续传、退回全量重放时从 ring 尾部截取，并置 `capped=true`；`resumed` 必须完整重放，不能截断序号。`capped` 不是断线丢失，客户端不弹「连接中断，历史已截断」。改协议时同步维护 capability，否则回滚会重复写屏
+- **心跳判死要看 timer 是否漂移**：Android Chrome 在后台/主线程繁忙时会把 20s 定时器节流到分钟级，恢复后不能立刻用 `Date.now()-lastServerMessageAt>25s` 判连接已死（会误杀健康连接并触发整段重放）。只有页面 `visible` 且本次 tick 间隔未超过 `HEARTBEAT_DRIFT_MS` 才判 `stale`；`visibilitychange` 到 visible 时重置基线。`client.ws.backlog`（age_ms/buffered/conn）用来区分链路 stall 与主线程 stall
 - `CHROME_SEL` 内的控件在捕获阶段 `pointerdown`+`mousedown` 阻止默认（iOS 必须 mousedown，WebKit bug 322721）以保持软键盘；新增"键盘弹起时会被点"的控件（菜单、选中条、滚动浮标、手势层）时加进去
 - 阻止默认后 `:active` 不可靠 → 反馈用 `.pressed` class
 - `modState` 键名小写；`dataset.key` 映射前先 `toLowerCase()`（历史 bug）

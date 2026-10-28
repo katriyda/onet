@@ -3,6 +3,7 @@ package main
 // session_replay_test.go — 可续传回放的序号语义、会话排序与启动安全校验。
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,7 @@ type testFrame struct {
 	Seq       uint64 `json:"seq"`
 	Resumed   bool   `json:"resumed"`
 	Truncated bool   `json:"truncated"`
+	Capped    bool   `json:"capped"`
 	FromSeq   uint64 `json:"from_seq"`
 	Level     string `json:"level"`
 	Message   string `json:"message"`
@@ -59,7 +61,7 @@ func TestReplaySinceSeq(t *testing.T) {
 	}
 	c := newTestClient()
 	since := uint64(4)
-	if err := s.Attach(c, &since); err != nil {
+	if err := s.Attach(c, &since, 0); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	frames := drainFrames(t, c)
@@ -89,7 +91,7 @@ func TestReplayTruncated(t *testing.T) {
 	firstKept := s.ring[0].Seq
 	c := newTestClient()
 	since := uint64(1)
-	if err := s.Attach(c, &since); err != nil {
+	if err := s.Attach(c, &since, 0); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	frames := drainFrames(t, c)
@@ -97,7 +99,7 @@ func TestReplayTruncated(t *testing.T) {
 		t.Fatal("没有收到帧")
 	}
 	att := frames[0]
-	if att.Type != "attached" || att.Resumed || !att.Truncated || att.FromSeq != firstKept {
+	if att.Type != "attached" || att.Resumed || !att.Truncated || att.Capped || att.FromSeq != firstKept {
 		t.Fatalf("attached = %+v, want truncated=true from=%d", att, firstKept)
 	}
 	var notice *testFrame
@@ -117,6 +119,49 @@ func TestReplayTruncated(t *testing.T) {
 	}
 	if firstOutput != firstKept {
 		t.Fatalf("首帧 seq = %d, want %d", firstOutput, firstKept)
+	}
+}
+
+func TestReplayMaxBytesKeepsTail(t *testing.T) {
+	s, l := newReplaySession(1024 * 1024)
+	for i := range 10 {
+		s.broadcastOutput(l, bytes.Repeat([]byte{byte('a' + i)}, 1024))
+	}
+	c := newTestClient()
+	if err := s.Attach(c, nil, 3*1024); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	frames := drainFrames(t, c)
+	att := frames[0]
+	if att.Type != "attached" || att.Resumed || !att.Truncated || !att.Capped || att.Seq != 10 || att.FromSeq != 8 {
+		t.Fatalf("attached = %+v, want capped+truncated seq=10 from=8", att)
+	}
+	var outputs []uint64
+	for _, f := range frames[1:] {
+		if f.Type == "notice" {
+			t.Fatalf("capped replay 不应再发断线 notice: %+v", f)
+		}
+		if f.Type == "output" {
+			outputs = append(outputs, f.Seq)
+		}
+	}
+	if len(outputs) != 3 || outputs[0] != 8 || outputs[2] != 10 {
+		t.Fatalf("output seqs = %v, want [8 9 10]", outputs)
+	}
+}
+
+func TestReplayMaxBytesKeepsOneOversizeFrame(t *testing.T) {
+	s, l := newReplaySession(1024 * 1024)
+	s.broadcastOutput(l, []byte("small"))
+	s.broadcastOutput(l, bytes.Repeat([]byte("x"), 8*1024))
+	c := newTestClient()
+	if err := s.Attach(c, nil, 1024); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	frames := drainFrames(t, c)
+	att := frames[0]
+	if !att.Truncated || !att.Capped || att.FromSeq != 2 || att.Seq != 2 {
+		t.Fatalf("attached = %+v, want single oversize frame seq=2", att)
 	}
 }
 

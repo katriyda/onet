@@ -400,8 +400,10 @@ var errSessionDead = fmt.Errorf("会话已退出")
 
 // Attach 先发 attached（带 seq/resumed/truncated），再发回放帧，最后登记客户端。
 // sinceSeq 非空且对应帧仍在 ring 内时只补发缺失帧；否则全量重放。
+// maxReplayBytes > 0 时，全量重放只保留最新的这部分字节（移动端首屏用），
+// 续传（resumed）不受限制，避免打断序号连续性。
 // 已死会话拒绝 attach。
-func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
+func (s *Session) Attach(c *Client, sinceSeq *uint64, maxReplayBytes int) error {
 	s.mu.Lock()
 	if s.dead || s.live == nil || s.handoff {
 		s.mu.Unlock()
@@ -412,6 +414,7 @@ func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
 	cur := s.seq
 	resumed := false
 	truncated := false
+	capped := false
 	fromSeq := cur + 1
 	var replay []outFrame
 	if n := len(s.ring); n > 0 {
@@ -437,6 +440,26 @@ func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
 		resumed = sinceSeq != nil && *sinceSeq >= cur
 	}
 
+	// 移动端首屏只需要最近的一段历史；从尾部往前取，至少保留一帧。
+	if !resumed && maxReplayBytes > 0 && len(replay) > 0 {
+		total := 0
+		keepFrom := len(replay)
+		for keepFrom > 0 {
+			n := len(replay[keepFrom-1].Data)
+			if total+n > maxReplayBytes && total > 0 {
+				break
+			}
+			total += n
+			keepFrom--
+		}
+		if keepFrom > 0 {
+			replay = replay[keepFrom:]
+			fromSeq = replay[0].Seq
+			truncated = true
+			capped = true
+		}
+	}
+
 	replayBytes := 0
 	for _, f := range replay {
 		replayBytes += len(f.Data)
@@ -448,6 +471,7 @@ func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
 		Seq:       cur,
 		Resumed:   resumed,
 		Truncated: truncated,
+		Capped:    capped,
 		FromSeq:   fromSeq,
 	}))
 	for _, f := range replay {
@@ -458,7 +482,7 @@ func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
 			Data: base64.StdEncoding.EncodeToString(f.Data),
 		}))
 	}
-	if truncated {
+	if truncated && !capped {
 		c.write(mustJSON(noticeMsg{Type: "notice", Level: "warn", Message: "历史已截断"}))
 	}
 	s.clients[c] = struct{}{}
@@ -471,8 +495,8 @@ func (s *Session) Attach(c *Client, sinceSeq *uint64) error {
 	}
 	appLog.Info("session.attach", "session", s.ID, "conn", c.logID(),
 		"replay_bytes", replayBytes, "clients", count,
-		"since_seq", since, "resumed", resumed, "truncated", truncated,
-		"seq", cur, "from_seq", fromSeq)
+		"since_seq", since, "resumed", resumed, "truncated", truncated, "capped", capped,
+		"seq", cur, "from_seq", fromSeq, "max_replay", maxReplayBytes)
 	return nil
 }
 
